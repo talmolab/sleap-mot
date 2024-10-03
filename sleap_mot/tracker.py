@@ -15,7 +15,7 @@ from sleap_mot.track_instance import (
     TrackInstances,
     TrackInstanceLocalQueue,
 )
-from utils import (
+from sleap_mot.utils import (
     hungarian_matching,
     greedy_matching,
     get_bbox,
