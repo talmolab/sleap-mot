@@ -1,0 +1,26 @@
+name: sleap-mot
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - numpy
+  - attrs
+  - sleap-io
+  - scipy
+  - ffmpeg
+  - opencv
+  # Dev dependencies
+  - pytest
+  - pytest-cov
+  - black
+  - pydocstyle
+  - toml
+  - twine
+  - python-build
+  - jupyterlab
+  - seaborn
+  - pip
+  - pip:
+    - "--editable=.[dev]"

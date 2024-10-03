@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sleap-mot"
+authors = [
+    {name = "Elise Davis", email = "edavis@salk.edu"},
+    {name = "Divya Seshadri Murali", email = "dimurali@salk.edu"},
+    {name = "Talmo Pereira", email = "talmo@salk.edu"}]
+description="Standalone multi-object tracking for the SLEAP ecosystem."
+requires-python = ">=3.9"
+keywords = ["sleap", "mot", "tracking", "pose tracking", "pose estimation", "behavior"]
+license = {text = "BSD-3-Clause"}
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12"]
+dependencies = [
+    "numpy",
+    "attrs",
+    "sleap-io",
+    "scipy",
+    "motmetrics"]
+dynamic = ["version", "readme"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sleap_mot.version.__version__"}
+readme = {file = ["README.md"], content-type="text/markdown"}
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-watch",
+    "black",
+    "pydocstyle",
+    "toml",
+    "twine",
+    "build",
+    "mkdocs-material[imaging]",
+    "mkdocs-jupyter",
+    "mkdocstrings[python]>=0.18",
+    "mkdocs-gen-files",
+    "mkdocs-literate-nav",
+    "mkdocs-section-index",
+    "mike"]
+
+[project.urls]
+Homepage = "https://sleap.ai"
+Repository = "https://github.com/talmolab/sleap-mot"
+
+[tool.setuptools.packages.find]
+exclude = ["site"]
+
+[tool.black]
+line-length = 88
+
+[pydocstyle]
+convention = "google"
+match-dir = "sleap_mot"
