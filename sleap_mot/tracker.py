@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 
 import sleap_io as sio
-from sleap_mot.evaluation import compute_oks
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
 from sleap_mot.candidates.local_queues import LocalQueueCandidates
 from sleap_mot.track_instance import (
@@ -24,6 +23,7 @@ from sleap_mot.utils import (
     compute_euclidean_distance,
     compute_iou,
     compute_cosine_sim,
+    compute_oks,
 )
 
 
