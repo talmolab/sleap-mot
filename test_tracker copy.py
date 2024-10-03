@@ -1,8 +1,8 @@
 import pytest
 import numpy as np
-#from sleap_nn.inference.predictors import main
-from sleap_mot.tracker import Tracker, FlowShiftTracker
-from sleap_mot.track_instance import (
+from sleap_nn.inference.predictors import main
+from sleap_nn.tracking.tracker import Tracker, FlowShiftTracker
+from sleap_nn.tracking.track_instance import (
     TrackedInstanceFeature,
     TrackInstanceLocalQueue,
     TrackInstances,
@@ -10,30 +10,30 @@ from sleap_mot.track_instance import (
 import math
 
 
-# def get_pred_instances(minimal_instance_ckpt):
-#     """Get `sio.PredictedInstance` objects from Predictor class."""
-#     result_labels = main(
-#         model_paths=[minimal_instance_ckpt],
-#         data_path="./tests/assets/minimal_instance.pkg.slp",
-#         provider="LabelsReader",
-#         make_labels=True,
-#         max_instances=6,
-#         peak_threshold=0.0,
-#         integral_refinement="integral",
-#     )
-#     pred_instances = []
-#     imgs = []
-#     for lf in result_labels:
-#         pred_instances.extend(lf.instances)
-#         imgs.append(lf.image)
-#     return pred_instances, imgs
+def get_pred_instances(minimal_instance_ckpt):
+    """Get `sio.PredictedInstance` objects from Predictor class."""
+    result_labels = main(
+        model_paths=[minimal_instance_ckpt],
+        data_path="./tests/assets/minimal_instance.pkg.slp",
+        provider="LabelsReader",
+        make_labels=True,
+        max_instances=6,
+        peak_threshold=0.0,
+        integral_refinement="integral",
+    )
+    pred_instances = []
+    imgs = []
+    for lf in result_labels:
+        pred_instances.extend(lf.instances)
+        imgs.append(lf.image)
+    return pred_instances, imgs
 
 
-def test_tracker(pred_instances, minimal_instance_ckpt):
+def test_tracker(minimal_instance_ckpt):
     """Test `Tracker` module."""
     # Test for the first two instances (high instance threshold)
     # no new tracks should be created
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(instance_score_threshold=1.0)
     assert isinstance(tracker, Tracker)
     assert not isinstance(tracker, FlowShiftTracker)
@@ -47,7 +47,7 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
     # Test Fixed-window method
     # pose as feature, oks scoring method, avg score reduction, hungarian matching
     # Test for the first two instances (tracks assigned to each of the new instances)
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0, candidates_method="fixed_window"
     )
@@ -64,7 +64,7 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
     # Test local queue method
     # pose as feature, oks scoring method, max score reduction, hungarian matching
     # Test for the first two instances (tracks assigned to each of the new instances)
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0, candidates_method="local_queues"
     )
@@ -79,7 +79,7 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
 
     # Test indv. functions for fixed window
     # with 2 existing tracks in the queue
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0,
         candidates_method="fixed_window",
@@ -88,7 +88,7 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
     )
     _ = tracker.track(pred_instances, 0)
 
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     # Test points as feature
     track_instances = tracker.get_features(pred_instances, 0, None)
     assert isinstance(track_instances, TrackInstances)
@@ -132,7 +132,7 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
 
     # Test local queue tracker
     # with existing tracks
-    #pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, _ = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0,
         candidates_method="local_queues",
@@ -218,11 +218,11 @@ def test_tracker(pred_instances, minimal_instance_ckpt):
         track_instances = tracker.track(pred_instances, 0)
 
 
-def test_flowshifttracker(minimal_instance_ckpt, pred_instances, imgs):
+def test_flowshifttracker(minimal_instance_ckpt):
     """Tests for `FlowShiftTracker` class."""
     # Test Fixed-window method: pose as feature, oks scoring method
     # Test for the first two instances (tracks assigned to each of the new instances)
-    #pred_instances, imgs = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, imgs = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0,
         candidates_method="fixed_window",
@@ -255,7 +255,7 @@ def test_flowshifttracker(minimal_instance_ckpt, pred_instances, imgs):
 
     # Test Local queue method: pose as feature, oks scoring method
     # Test for the first two instances (tracks assigned to each of the new instances)
-    #pred_instances, imgs = get_pred_instances(minimal_instance_ckpt)
+    pred_instances, imgs = get_pred_instances(minimal_instance_ckpt)
     tracker = Tracker.from_config(
         instance_score_threshold=0.0,
         candidates_method="local_queues",

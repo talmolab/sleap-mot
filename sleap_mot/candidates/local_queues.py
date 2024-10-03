@@ -3,7 +3,7 @@
 from typing import Dict, Optional, List, Deque, DefaultDict, Union
 import numpy as np
 import sleap_io as sio
-from sleap_nn.tracking.track_instance import (
+from track_instance import (
     TrackInstanceLocalQueue,
     TrackedInstanceFeature,
 )
@@ -63,7 +63,7 @@ class LocalQueueCandidates:
         return track_instances
 
     def get_features_from_track_id(
-        self, track_id: int, candidates_list: Optional[DefaultDict[int, Deque]] = None
+        self, track_id: int, features, candidates_list: Optional[DefaultDict[int, Deque]] = None
     ) -> List[TrackedInstanceFeature]:
         """Return list of `TrackedInstanceFeature` objects for instances in tracker queue with the given `track_id`.
 

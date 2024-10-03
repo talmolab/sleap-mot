@@ -1,7 +1,7 @@
 """Module to generate Fixed window candidates."""
 
 from typing import Optional, List, Deque, Union
-from sleap_nn.tracking.track_instance import TrackInstances, TrackedInstanceFeature
+from track_instance import TrackInstances, TrackedInstanceFeature
 import sleap_io as sio
 from collections import deque
 import numpy as np

@@ -7,15 +7,15 @@ import cv2
 import numpy as np
 
 import sleap_io as sio
-from sleap_nn.evaluation import compute_oks
-from sleap_nn.tracking.candidates.fixed_window import FixedWindowCandidates
-from sleap_nn.tracking.candidates.local_queues import LocalQueueCandidates
-from sleap_nn.tracking.track_instance import (
+from evaluation import compute_oks
+from candidates.fixed_window import FixedWindowCandidates
+from candidates.local_queues import LocalQueueCandidates
+from track_instance import (
     TrackedInstanceFeature,
     TrackInstances,
     TrackInstanceLocalQueue,
 )
-from sleap_nn.tracking.utils import (
+from utils import (
     hungarian_matching,
     greedy_matching,
     get_bbox,
