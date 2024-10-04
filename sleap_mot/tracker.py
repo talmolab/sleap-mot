@@ -206,15 +206,6 @@ class Tracker:
 
         labels.update()
 
-        # Remove unused tracks.
-        labels.clean(
-            frames=False,
-            empty_instances=False,
-            skeletons=False,
-            tracks=True,
-            videos=False,
-        )
-
         return labels
 
     def track_frame(
