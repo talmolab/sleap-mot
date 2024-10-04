@@ -24,7 +24,7 @@ def test_high_threshold(centered_pair_predictions):
     assert isinstance(tracker, Tracker)
     assert not isinstance(tracker, FlowShiftTracker)
 
-    tracked_instances = tracker.track(pred_instances, 0)
+    tracked_instances = tracker.track_frame(pred_instances, 0)
     for inst in tracked_instances:
         assert inst.track is None
     assert len(tracker.candidate.current_tracks) == 0
@@ -45,10 +45,13 @@ def test_fixed_window(centered_pair_predictions):
     for inst in pred_instances:
         assert inst.track is None
 
-    tracked_instances = tracker.track(pred_instances, 0)  # 2 tracks are created
+    tracked_instances = tracker.track_frame(pred_instances, 0)  # 2 tracks are created
     for inst in tracked_instances:
         assert inst.track is not None
-    assert tracked_instances[0].track.name == 0 and tracked_instances[1].track.name == 1
+    assert (
+        tracked_instances[0].track.name == "track_0"
+        and tracked_instances[1].track.name == "track_1"
+    )
     assert len(tracker.candidate.tracker_queue) == 1
     assert tracker.candidate.current_tracks == [0, 1]
     assert tracker.candidate.tracker_queue[0].track_ids == [0, 1]
@@ -66,12 +69,15 @@ def test_local_queue(centered_pair_predictions):
     tracker = Tracker.from_config(
         instance_score_threshold=0.0, candidates_method="local_queues"
     )
-    tracked_instances = tracker.track(pred_instances, 0)  # 2 tracks are created
+    tracked_instances = tracker.track_frame(pred_instances, 0)  # 2 tracks are created
     for inst in tracked_instances:
         assert inst.track is not None
     assert len(tracker.candidate.tracker_queue) == 2
     assert tracker.candidate.current_tracks == [0, 1]
-    assert tracked_instances[0].track.name == 0 and tracked_instances[1].track.name == 1
+    assert (
+        tracked_instances[0].track.name == "track_0"
+        and tracked_instances[1].track.name == "track_1"
+    )
 
 
 def test_fixed_window(centered_pair_predictions):
@@ -87,9 +93,12 @@ def test_fixed_window(centered_pair_predictions):
         scoring_reduction="max",
         track_matching_method="greedy",
     )
-    tracked_instances = tracker.track(pred_instances, 0)
+    tracked_instances = tracker.track_frame(pred_instances, 0)
     assert tracker.candidate.current_tracks == [0, 1]
-    assert tracked_instances[0].track.name == 0 and tracked_instances[1].track.name == 1
+    assert (
+        tracked_instances[0].track.name == "track_0"
+        and tracked_instances[1].track.name == "track_1"
+    )
 
 
 def test_point_features(centered_pair_predictions):
@@ -121,7 +130,7 @@ def test_score_and_assign(centered_pair_predictions):
         scoring_reduction="max",
         track_matching_method="greedy",
     )
-    tracked_instances = tracker.track(pred_instances, 0)
+    tracked_instances = tracker.track_frame(pred_instances, 0)
 
     # Test get_scores(), oks as scoring
     track_instances = tracker.get_features(pred_instances, 0, None)
@@ -139,7 +148,7 @@ def test_score_and_assign(centered_pair_predictions):
     assert len(tracker.candidate.tracker_queue) == 2
     assert track_instances.tracking_scores == [1.0, 1.0]
 
-    tracked_instances = tracker.track(pred_instances, 0)
+    tracked_instances = tracker.track_frame(pred_instances, 0)
     assert len(tracker.candidate.tracker_queue) == 3
     assert len(tracker.candidate.current_tracks) == 2
     assert np.all(
@@ -150,3 +159,11 @@ def test_score_and_assign(centered_pair_predictions):
         tracker.candidate.tracker_queue[0].track_ids[1]
         == tracker.candidate.tracker_queue[2].track_ids[1]
     )
+
+
+def test_tracker_track(noisy_clip_predictions_untracked):
+    tracker = Tracker.from_config(candidates_method="local_queues", max_tracks=2)
+
+    tracked_labels = tracker.track(noisy_clip_predictions_untracked, inplace=False)
+    assert len(tracked_labels) == len(noisy_clip_predictions_untracked)
+    assert len(tracked_labels.tracks) == 2

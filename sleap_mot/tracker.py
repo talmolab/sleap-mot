@@ -5,6 +5,7 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
+from copy import deepcopy
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -177,7 +178,46 @@ class Tracker:
         )
         return tracker
 
-    def track(
+    def track(self, labels: sio.Labels, inplace: bool = False):
+        """Track instances across frames.
+
+        Args:
+            labels: `sio.Labels` object with predicted instances.
+            inplace: If True, the labels are modified in-place. Default: False.
+
+        Returns:
+            `sio.Labels` object with tracked instances.
+        """
+        if not inplace:
+            labels = deepcopy(labels)
+
+        if len(labels.videos) > 1:
+            # TODO: Handle multi-video tracking when resetting is implemented.
+            raise NotImplementedError(
+                "Multiple videos are not supported. Please provide labels with a single video."
+            )
+
+        # Check if images can be loaded just once.
+        can_load_images = labels.video.exists()
+
+        for lf in labels:
+            img = lf.image if can_load_images else None
+            lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
+
+        labels.update()
+
+        # Remove unused tracks.
+        labels.clean(
+            frames=False,
+            empty_instances=False,
+            skeletons=False,
+            tracks=True,
+            videos=False,
+        )
+
+        return labels
+
+    def track_frame(
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
@@ -226,7 +266,7 @@ class Tracker:
                 if instance.track_id is not None:
                     if instance.track_id not in self._track_objects:
                         self._track_objects[instance.track_id] = sio.Track(
-                            instance.track_id
+                            f"track_{instance.track_id}"
                         )
                     instance.src_instance.track = self._track_objects[instance.track_id]
                     instance.src_instance.tracking_score = instance.tracking_score
@@ -238,7 +278,7 @@ class Tracker:
                 track_id = current_tracked_instances.track_ids[idx]
                 if track_id is not None:
                     if track_id not in self._track_objects:
-                        self._track_objects[track_id] = sio.Track(track_id)
+                        self._track_objects[track_id] = sio.Track(f"track_{track_id}")
                     inst.track = self._track_objects[track_id]
                     inst.tracking_score = current_tracked_instances.tracking_scores[idx]
                     new_pred_instances.append(inst)
