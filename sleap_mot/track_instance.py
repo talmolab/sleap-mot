@@ -11,12 +11,12 @@ class TrackInstances:
     """Data structure for instances in tracker queue for fixed window method."""
 
     src_instances: List[sio.PredictedInstance]
-    features: List[np.array]
+    features: List[np.ndarray]
     instance_scores: List[float] = None
     track_ids: Optional[List[int]] = None
     tracking_scores: Optional[List[float]] = None
     frame_idx: Optional[float] = None
-    image: Optional[np.array] = None
+    image: Optional[np.ndarray] = None
 
 
 @attrs.define
@@ -25,12 +25,12 @@ class TrackInstanceLocalQueue:
 
     src_instance: sio.PredictedInstance
     src_instance_idx: int
-    feature: np.array
+    feature: np.ndarray
     instance_score: float = None
     track_id: Optional[int] = None
     tracking_score: Optional[float] = None
     frame_idx: Optional[float] = None
-    image: Optional[np.array] = None
+    image: Optional[np.ndarray] = None
 
 
 @attrs.define
