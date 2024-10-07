@@ -212,6 +212,7 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
+        features,
         image: np.ndarray = None,
     ) -> List[sio.PredictedInstance]:
         """Assign track IDs to the untracked list of `sio.PredictedInstance` objects.
@@ -225,7 +226,9 @@ class Tracker:
             List of `sio.PredictedInstance` objects, each having an assigned track.
         """
         # get features for the untracked instances.
-        current_instances = self.get_features(untracked_instances, frame_idx, image)
+        current_instances = self.get_features(
+            untracked_instances, frame_idx, features, image
+        )
 
         candidates_list = (
             self.generate_candidates()
@@ -280,6 +283,7 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
+        features,
         image: np.ndarray = None,
     ) -> Union[TrackInstances, List[TrackInstanceLocalQueue]]:
         """Get features for the current untracked instances.
@@ -301,14 +305,18 @@ class Tracker:
                 "Invalid `features` argument. Please provide one of `keypoints`, `centroids`, `bboxes` and `image`"
             )
 
-        feature_method = self._feature_methods[self.features]
-        feature_list = []
-        for pred_instance in untracked_instances:
-            feature_list.append(feature_method(pred_instance))
-
-        current_instances = self.candidate.get_track_instances(
-            feature_list, untracked_instances, frame_idx=frame_idx, image=image
-        )
+        current_instances = []
+        for j, inst in enumerate(untracked_instances):
+            track_instance = TrackInstanceLocalQueue(
+                track_id=None,
+                src_instance=inst,
+                src_instance_idx=j,
+                feature=features[frame_idx][j],
+                instance_score=inst.score,
+                frame_idx=frame_idx,
+                image=image,
+            )
+            current_instances.append(track_instance)
 
         return current_instances
 
