@@ -5,10 +5,12 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
+import h5py
 from copy import deepcopy
 from collections import deque
 
 import sleap_io as sio
+from sleap_mot.global_track import global_track
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
 from sleap_mot.candidates.local_queues import LocalQueueCandidates
 from sleap_mot.track_instance import (
@@ -179,7 +181,12 @@ class Tracker:
         )
         return tracker
 
-    def track(self, labels: sio.Labels, freqs,inplace: bool = False):
+    def track(
+        self,
+        input_slp_path,
+        input_vid_path,
+        output_features_path=None,
+    ):
         """Track instances across frames.
 
         Args:
@@ -190,35 +197,50 @@ class Tracker:
             `sio.Labels` object with tracked instances.
         """
 
-        for track_id in range(self.candidate.max_tracks):
-            self.candidate.tracker_queue[track_id] = deque(maxlen=self.candidate.window_size)
-            self.candidate.current_tracks.append(track_id)
+        labels, output_features_path = global_track(
+            input_slp_path, input_vid_path, output_features_path
+        )
+
+        features = h5py.File(output_features_path, "r")
+        freqs = features["frequencies"]
+
+        # for track_id in range(self.candidate.max_tracks):
+        #     self.candidate.tracker_queue[track_id] = deque(
+        #         maxlen=self.candidate.window_size
+        #     )
+        #     self.candidate.current_tracks.append(track_id)
 
         for lf in labels:
             ind = lf.frame_idx
             for j, inst in enumerate(lf.instances):
                 if inst.track is not None:
                     track_instance = TrackInstanceLocalQueue(
-                        track_id = inst.track,
-                        src_instance = inst,
-                        src_instance_idx = ind,
-                        feature = freqs[ind][j],
-                        instance_score = inst.score,
-                        frame_idx = ind,
-                        image = lf.image
+                        track_id=inst.track,
+                        src_instance=inst,
+                        src_instance_idx=ind,
+                        feature=freqs[ind][j],
+                        instance_score=inst.score,
+                        frame_idx=ind,
+                        image=lf.image,
                     )
                     # add track_instance to tracker_queue at the number that is in inst.track.name
-                    queue_index = int(inst.track.name.split('_')[1])
-                    if queue_index not in self._track_objects:
+                    queue_index = int(inst.track.name)
+                    matching_track = next((track for track in self._track_objects.values() if track.name == queue_index), None)
+                    if matching_track is None:
                         self._track_objects[queue_index] = inst.track
                     self.candidate.tracker_queue[queue_index].append(track_instance)
 
                 else:
-                    self.track_frame(lf.instances, frame_idx=lf.frame_idx, features = freqs,image=lf.image)
+                    self.track_frame(
+                        lf.instances,
+                        frame_idx=lf.frame_idx,
+                        features=freqs,
+                        image=lf.image,
+                    )
                     break
 
+        features.close()
         return labels
-
 
     def track_frame(
         self,
@@ -246,7 +268,7 @@ class Tracker:
             self.generate_candidates()
         )  # either Deque/ DefaultDict for FixedWindow/ LocalQueue candidate.
 
-        if candidates_list:
+        if not all(len(deque) == 0 for deque in candidates_list.values()):
             # if track queue is not empty
 
             # update candidates if needed and get the features from previous tracked instances.
