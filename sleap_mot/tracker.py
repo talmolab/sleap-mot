@@ -9,7 +9,6 @@ import h5py
 from copy import deepcopy
 
 import sleap_io as sio
-from sleap_mot.global_track import global_track
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
 from sleap_mot.candidates.local_queues import LocalQueueCandidates
 from sleap_mot.track_instance import (
