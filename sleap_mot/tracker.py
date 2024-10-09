@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import h5py
 from copy import deepcopy
-from collections import deque
 
 import sleap_io as sio
 from sleap_mot.global_track import global_track
@@ -181,12 +180,7 @@ class Tracker:
         )
         return tracker
 
-    def track(
-        self,
-        input_slp_path,
-        input_vid_path,
-        output_features_path=None,
-    ):
+    def track(self, labels: sio.Labels, freqs, inplace: bool = False):
         """Track instances across frames.
 
         Args:
@@ -196,19 +190,17 @@ class Tracker:
         Returns:
             `sio.Labels` object with tracked instances.
         """
+        if not inplace:
+            labels = deepcopy(labels)
 
-        labels, output_features_path = global_track(
-            input_slp_path, input_vid_path, output_features_path
-        )
+        if len(labels.videos) > 1:
+            # TODO: Handle multi-video tracking when resetting is implemented.
+            raise NotImplementedError(
+                "Multiple videos are not supported. Please provide labels with a single video."
+            )
 
-        features = h5py.File(output_features_path, "r")
-        freqs = features["frequencies"]
-
-        # for track_id in range(self.candidate.max_tracks):
-        #     self.candidate.tracker_queue[track_id] = deque(
-        #         maxlen=self.candidate.window_size
-        #     )
-        #     self.candidate.current_tracks.append(track_id)
+        # Check if images can be loaded just once.
+        can_load_images = labels.video.exists()
 
         for lf in labels:
             ind = lf.frame_idx
@@ -239,7 +231,6 @@ class Tracker:
                     )
                     break
 
-        features.close()
         return labels
 
     def track_frame(
