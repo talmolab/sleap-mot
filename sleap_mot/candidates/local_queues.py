@@ -42,10 +42,10 @@ class LocalQueueCandidates:
 
     def get_track_instances(
         self,
-        feature_list: List[Union[np.array]],
+        feature_list: List[Union[np.ndarray]],
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
-        image: np.array,
+        image: np.ndarray,
     ) -> List[TrackInstanceLocalQueue]:
         """Return a list of `TrackInstanceLocalQueue` instances for the `untracked_instances`."""
         track_instances = []
@@ -117,8 +117,8 @@ class LocalQueueCandidates:
     def update_tracks(
         self,
         current_instances: List[TrackInstanceLocalQueue],
-        row_inds: np.array,
-        col_inds: np.array,
+        row_inds: np.ndarray,
+        col_inds: np.ndarray,
         tracking_scores: List[float],
     ) -> List[TrackInstanceLocalQueue]:
         """Assign tracks to `TrackInstanceLocalQueue` objects based on the output of track matching algorithm.
