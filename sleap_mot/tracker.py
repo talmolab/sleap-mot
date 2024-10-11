@@ -214,11 +214,9 @@ class Tracker:
                         frame_idx=ind,
                         image=lf.image,
                     )
-                    # add track_instance to tracker_queue at the number that is in inst.track.name
-                    queue_index = int(inst.track.name)
-                    matching_track = next((track for track in self._track_objects.values() if track.name == queue_index), None)
-                    if matching_track is None:
-                        self._track_objects[queue_index] = inst.track
+                    # Get all integer values from inst.track.name
+                    queue_index = int(inst.track.name.split('_')[1])
+                    self._track_objects[queue_index] = inst.track
                     self.candidate.tracker_queue[queue_index].append(track_instance)
 
                 else:
