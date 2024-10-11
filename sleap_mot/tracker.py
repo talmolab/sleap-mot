@@ -5,6 +5,7 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
+import h5py
 from copy import deepcopy
 
 import sleap_io as sio
@@ -178,7 +179,7 @@ class Tracker:
         )
         return tracker
 
-    def track(self, labels: sio.Labels, inplace: bool = False):
+    def track(self, labels: sio.Labels, freqs, inplace: bool = False):
         """Track instances across frames.
 
         Args:
@@ -201,10 +202,31 @@ class Tracker:
         can_load_images = labels.video.exists()
 
         for lf in labels:
-            img = lf.image if can_load_images else None
-            lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
+            ind = lf.frame_idx
+            for j, inst in enumerate(lf.instances):
+                if inst.track is not None:
+                    track_instance = TrackInstanceLocalQueue(
+                        track_id=inst.track,
+                        src_instance=inst,
+                        src_instance_idx=ind,
+                        feature=freqs[ind][j],
+                        instance_score=inst.score,
+                        frame_idx=ind,
+                        image=lf.image,
+                    )
+                    # Get all integer values from inst.track.name
+                    queue_index = int(inst.track.name.split('_')[1])
+                    self._track_objects[queue_index] = inst.track
+                    self.candidate.tracker_queue[queue_index].append(track_instance)
 
-        labels.update()
+                else:
+                    self.track_frame(
+                        lf.instances,
+                        frame_idx=lf.frame_idx,
+                        features=freqs,
+                        image=lf.image,
+                    )
+                    break
 
         return labels
 
@@ -212,6 +234,7 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
+        features,
         image: np.ndarray = None,
     ) -> List[sio.PredictedInstance]:
         """Assign track IDs to the untracked list of `sio.PredictedInstance` objects.
@@ -225,13 +248,15 @@ class Tracker:
             List of `sio.PredictedInstance` objects, each having an assigned track.
         """
         # get features for the untracked instances.
-        current_instances = self.get_features(untracked_instances, frame_idx, image)
+        current_instances = self.get_features(
+            untracked_instances, frame_idx, features, image
+        )
 
         candidates_list = (
             self.generate_candidates()
         )  # either Deque/ DefaultDict for FixedWindow/ LocalQueue candidate.
 
-        if candidates_list:
+        if not all(len(deque) == 0 for deque in candidates_list.values()):
             # if track queue is not empty
 
             # update candidates if needed and get the features from previous tracked instances.
@@ -280,6 +305,7 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
+        features,
         image: np.ndarray = None,
     ) -> Union[TrackInstances, List[TrackInstanceLocalQueue]]:
         """Get features for the current untracked instances.
@@ -301,14 +327,18 @@ class Tracker:
                 "Invalid `features` argument. Please provide one of `keypoints`, `centroids`, `bboxes` and `image`"
             )
 
-        feature_method = self._feature_methods[self.features]
-        feature_list = []
-        for pred_instance in untracked_instances:
-            feature_list.append(feature_method(pred_instance))
-
-        current_instances = self.candidate.get_track_instances(
-            feature_list, untracked_instances, frame_idx=frame_idx, image=image
-        )
+        current_instances = []
+        for j, inst in enumerate(untracked_instances):
+            track_instance = TrackInstanceLocalQueue(
+                track_id=None,
+                src_instance=inst,
+                src_instance_idx=j,
+                feature=features[frame_idx][j],
+                instance_score=inst.score,
+                frame_idx=frame_idx,
+                image=image,
+            )
+            current_instances.append(track_instance)
 
         return current_instances
 
