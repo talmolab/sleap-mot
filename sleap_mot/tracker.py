@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from collections import deque
 from pathlib import Path
+import sys
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -223,7 +224,8 @@ class Tracker:
                         src_instance=inst,
                         src_instance_idx=ind,
                         feature=freqs[ind][j],
-                        instance_score=inst.score,
+                        instance_score=inst.score if hasattr(inst, 'score') else None,
+                        #TODO: delete once enabled backwards propogation
                         frame_idx=ind,
                         image=lf.image if can_load_images else None,
                     )

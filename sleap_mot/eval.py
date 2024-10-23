@@ -161,8 +161,26 @@ def get_metrics(df_gt_in, df_pred_in):
     # get pymotmetrics summary
     mh = mm.metrics.create()
     summary = mh.compute(acc, name="acc").transpose()
+
+    if total_mislabeled_frames > len(df_merged['frame_id'].unique()) / 2:
+        total_mislabeled_frames = len(df_merged['frame_id'].unique()) - total_mislabeled_frames
+        # Get all unique frame IDs
+        all_frames = set(df_merged['frame_id'].unique())
+        
+        # Convert mislabeled_frames to a set for efficient difference operation
+        mislabeled_frames_set = set(mislabeled_frames)
+        
+        # Find frames that are not in mislabeled_frames
+        correctly_labeled_frames = list(all_frames - mislabeled_frames_set)
+        
+        # Sort the list to maintain order
+        correctly_labeled_frames.sort()
+    
+        # Update mislabeled_frames to be the list of correctly labeled frames
+        mislabeled_frames = correctly_labeled_frames
     # Group consecutive mislabeled frames
     grouped_mislabeled_frames = []
+    group_lengths = []
     if mislabeled_frames:
         current_group = [mislabeled_frames[0]]
         for frame in mislabeled_frames[1:]:
@@ -170,7 +188,9 @@ def get_metrics(df_gt_in, df_pred_in):
                 current_group.append(frame)
             else:
                 grouped_mislabeled_frames.append(current_group)
+                group_lengths.append(len(current_group))
                 current_group = [frame]
         grouped_mislabeled_frames.append(current_group)
+        group_lengths.append(len(current_group))
 
-    return summary, total_mislabeled_frames, grouped_mislabeled_frames
+    return summary, total_mislabeled_frames, group_lengths
