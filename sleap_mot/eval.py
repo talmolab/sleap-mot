@@ -1,3 +1,4 @@
+"""Module for evaluation."""
 import numpy as np
 import motmetrics as mm
 import pandas as pd
