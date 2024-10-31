@@ -207,11 +207,13 @@ class Tracker:
         if any(inst.src_instance.track is not None for inst in current_instances):
             current_tracked_instances = []
             for inst in current_instances:
-                track_name = int(inst.src_instance.track.name.split('_')[1])
+                track_name = int(inst.src_instance.track.name.split("_")[1])
 
                 inst.track_id = track_name
                 current_tracked_instances.append(inst)
-                self.candidate.tracker_queue[track_name] = deque(maxlen=self.candidate.window_size)
+                self.candidate.tracker_queue[track_name] = deque(
+                    maxlen=self.candidate.window_size
+                )
                 self.candidate.tracker_queue[track_name].append(inst)
 
                 if track_name not in self.candidate.current_tracks:
@@ -231,7 +233,9 @@ class Tracker:
                 )
 
             else:
-                current_tracked_instances = self.candidate.add_new_tracks(current_instances)
+                current_tracked_instances = self.candidate.add_new_tracks(
+                    current_instances
+                )
 
         # Convert the `current_instances` back to `List[sio.PredictedInstance]` objects.
         if self.is_local_queue:
@@ -616,4 +620,3 @@ class FlowShiftTracker(Tracker):
         )
 
         return shifted_instances_prv_frames
-
