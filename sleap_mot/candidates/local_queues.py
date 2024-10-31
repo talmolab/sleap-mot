@@ -102,36 +102,15 @@ class LocalQueueCandidates:
         self, current_instances: List[TrackInstanceLocalQueue]
     ) -> List[TrackInstanceLocalQueue]:
         """Add new track IDs to the `TrackInstanceLocalQueue` objects and to the tracker queue."""
-
-        luminance_bins = np.tile(np.arange(4, dtype=float) / 3, 15)
-        
         track_instances = []
-        darkest_instance = None
-        darkest_value = float('inf')  # Initialize to a very high value
-
         for t in current_instances:
             if t.instance_score > self.instance_score_threshold:
-                # Calculate the average pixel value for the current instance's feature
-                avg_pixel_value = np.mean(t.feature)  # Assuming t.feature contains the pixel values
-                
-                # Check if this instance is the darkest
-                if avg_pixel_value < darkest_value:
-                    darkest_value = avg_pixel_value
-                    darkest_instance = t
-
                 new_track_id = self.get_new_track_id()
                 t.track_id = new_track_id
                 t.tracking_score = 1.0
                 self.current_tracks.append(new_track_id)
                 self.tracker_queue[new_track_id].append(t)
             track_instances.append(t)
-
-        # If a darkest instance was found, assign it track_0
-        if darkest_instance is not None:
-            darkest_instance.track_id = 0
-            darkest_instance.tracking_score = 1.0
-            self.current_tracks.append(0)
-            self.tracker_queue[0].append(darkest_instance)
 
         return track_instances
 

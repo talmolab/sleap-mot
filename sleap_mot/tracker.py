@@ -5,9 +5,8 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
+from copy import deepcopy
 from collections import deque
-from pathlib import Path
-import sys
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -180,69 +179,18 @@ class Tracker:
         )
         return tracker
 
-    def track(self, labels: sio.Labels, freqs, img = None, inplace: bool = False):
-        """Track instances across frames.
-
-        Args:
-            labels: `sio.Labels` object with predicted instances.
-            inplace: If True, the labels are modified in-place. Default: False.
-
-        Returns:
-            `sio.Labels` object with tracked instances.
-        """
-        #if not inplace:
-       #     labels = deepcopy(labels)
+    def track(self, labels: sio.Labels, inplace: bool = False):
+        """Track instances across frames."""
 
         if len(labels.videos) > 1:
-            # TODO: Handle multi-video tracking when resetting is implemented.
-            raise NotImplementedError(
-                "Multiple videos are not supported. Please provide labels with a single video."
-            )
+            raise NotImplementedError("Multiple videos are not supported.")
 
-        # Check if images can be loaded just once.
-        if img is not None and Path(img).exists():
-            labels.replace_filenames(prefix_map={
-                Path(labels.videos[0].backend_metadata['filename']).parent: Path(img).parent
-            })
-            can_load_images = True
-        elif labels.videos[0].image is not None and Path(labels.videos[0].image).exists():
-            can_load_images = True
-        else:
-            can_load_images = False
-
-        for track_id in range(self.candidate.max_tracks):
-            self.candidate.tracker_queue[track_id] = deque(maxlen=self.candidate.window_size)
-            self.candidate.current_tracks.append(track_id)
+        can_load_images = labels.video.exists()
 
         for lf in labels:
-            ind = lf.frame_idx
+            img = lf.image if can_load_images else None
+            lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
 
-            for j, inst in enumerate(lf.instances):
-                if inst.track is not None:
-                    track_instance = TrackInstanceLocalQueue(
-                        track_id=inst.track,
-                        src_instance=inst,
-                        src_instance_idx=ind,
-                        feature=freqs[ind][j],
-                        instance_score=inst.score if hasattr(inst, 'score') else None,
-                        #TODO: delete once enabled backwards propogation
-                        frame_idx=ind,
-                        image=lf.image if can_load_images else None,
-                    )
-                    # Get all integer values from inst.track.name
-                    queue_index = int(inst.track.name.split('_')[1])
-                    if queue_index not in self._track_objects:
-                        self._track_objects[queue_index] = inst.track
-                    self.candidate.tracker_queue[queue_index].append(track_instance)
-
-                else:
-                    lf.instances =self.track_frame(
-                        lf.instances,
-                        frame_idx=lf.frame_idx,
-                        features=freqs,
-                        image=lf.image if can_load_images else None,
-                    )
-                    break
         labels.update()
         return labels
 
@@ -250,48 +198,42 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
-        features,
         image: np.ndarray = None,
     ) -> List[sio.PredictedInstance]:
-        """Assign track IDs to the untracked list of `sio.PredictedInstance` objects.
-
-        Args:
-            untracked_instances: List of untracked `sio.PredictedInstance` objects.
-            frame_idx: Frame index of the predicted instances.
-            image: Source image if visual features are to be used (also when using flow).
-
-        Returns:
-            List of `sio.PredictedInstance` objects, each having an assigned track.
-        """
+        """Assign track IDs to the untracked list of `sio.PredictedInstance` objects."""
         # get features for the untracked instances.
-        current_instances = self.get_features(
-            untracked_instances, frame_idx, features, image
-        )
+        current_instances = self.get_features(untracked_instances, frame_idx, image)
 
-        candidates_list = (
-            self.generate_candidates()
-        )  # either Deque/ DefaultDict for FixedWindow/ LocalQueue candidate.
+        if any(inst.src_instance.track is not None for inst in current_instances):
+            current_tracked_instances = []
+            for inst in current_instances:
+                track_name = int(inst.src_instance.track.name.split('_')[1])
 
-        if candidates_list:
-            # if track queue is not empty
+                inst.track_id = track_name
+                current_tracked_instances.append(inst)
+                self.candidate.tracker_queue[track_name] = deque(maxlen=self.candidate.window_size)
+                self.candidate.tracker_queue[track_name].append(inst)
 
-            # update candidates if needed and get the features from previous tracked instances.
-            candidates_feature_dict = self.update_candidates(candidates_list, image)
-
-            # scoring function
-            scores = self.get_scores(current_instances, candidates_feature_dict)
-            cost_matrix = self.scores_to_cost_matrix(scores)
-
-            # track assignment
-            current_tracked_instances = self.assign_tracks(
-                current_instances, cost_matrix
-            )
+                if track_name not in self.candidate.current_tracks:
+                    self.candidate.current_tracks.append(track_name)
 
         else:
-            # Initialize the tracker queue if empty.
-            current_tracked_instances = self.candidate.add_new_tracks(current_instances)
+            candidates_list = self.generate_candidates()
 
-        # convert the `current_instances` back to `List[sio.PredictedInstance]` objects.
+            if candidates_list:
+                candidates_feature_dict = self.update_candidates(candidates_list, image)
+
+                scores = self.get_scores(current_instances, candidates_feature_dict)
+                cost_matrix = self.scores_to_cost_matrix(scores)
+
+                current_tracked_instances = self.assign_tracks(
+                    current_instances, cost_matrix
+                )
+
+            else:
+                current_tracked_instances = self.candidate.add_new_tracks(current_instances)
+
+        # Convert the `current_instances` back to `List[sio.PredictedInstance]` objects.
         if self.is_local_queue:
             new_pred_instances = []
             for instance in current_tracked_instances:
@@ -321,7 +263,6 @@ class Tracker:
         self,
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
-        features,
         image: np.ndarray = None,
     ) -> Union[TrackInstances, List[TrackInstanceLocalQueue]]:
         """Get features for the current untracked instances.
@@ -343,18 +284,14 @@ class Tracker:
                 "Invalid `features` argument. Please provide one of `keypoints`, `centroids`, `bboxes` and `image`"
             )
 
-        current_instances = []
-        for j, inst in enumerate(untracked_instances):
-            track_instance = TrackInstanceLocalQueue(
-                track_id=None,
-                src_instance=inst,
-                src_instance_idx=j,
-                feature=features[frame_idx][j],
-                instance_score=inst.score,
-                frame_idx=frame_idx,
-                image=image,
-            )
-            current_instances.append(track_instance)
+        feature_method = self._feature_methods[self.features]
+        feature_list = []
+        for pred_instance in untracked_instances:
+            feature_list.append(feature_method(pred_instance))
+
+        current_instances = self.candidate.get_track_instances(
+            feature_list, untracked_instances, frame_idx=frame_idx, image=image
+        )
 
         return current_instances
 
@@ -679,3 +616,4 @@ class FlowShiftTracker(Tracker):
         )
 
         return shifted_instances_prv_frames
+
