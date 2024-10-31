@@ -71,7 +71,6 @@ def get_metrics(df_gt_in, df_pred_in):
         total_mislabeled_frames (int): Total number of mislabeled frames.
         group_lengths (list): Lengths of consecutive mislabeled frames.
     """
-
     df_gt = get_df(df_gt_in, track_key="gt_track_id")
     df_pred = get_df(df_pred_in, track_key="pred_track_id")
 
