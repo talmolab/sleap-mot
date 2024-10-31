@@ -4,6 +4,15 @@ import pandas as pd
 
 
 def get_df(df, track_key):
+    """Get a dataframe from a list of labeled frames.
+
+    Args:
+        df (Labels): Labeled frames.
+        track_key (str): Key to use for the track ID.
+
+    Returns:
+        df (pd.DataFrame): Dataframe with the labeled frames.
+    """
     gt_frame_meta_list = []
 
     # loop through the labeled frames
@@ -51,6 +60,17 @@ def get_df(df, track_key):
 
 
 def get_metrics(df_gt_in, df_pred_in):
+    """Get metrics for tracking using a ground truth (proofread) file and a predicted file.
+
+    Args:
+        df_gt_in (Labels): Labeled frames from a proofread file.
+        df_pred_in (Labels): Labeled frames from a predicted file.
+
+    Returns:
+        summary (pd.DataFrame): Summary of the tracking metrics.
+        total_mislabeled_frames (int): Total number of mislabeled frames.
+        group_lengths (list): Lengths of consecutive mislabeled frames.
+    """
 
     df_gt = get_df(df_gt_in, track_key="gt_track_id")
     df_pred = get_df(df_pred_in, track_key="pred_track_id")

@@ -181,7 +181,6 @@ class Tracker:
 
     def track(self, labels: sio.Labels, inplace: bool = False):
         """Track instances across frames."""
-
         if len(labels.videos) > 1:
             raise NotImplementedError("Multiple videos are not supported.")
 
