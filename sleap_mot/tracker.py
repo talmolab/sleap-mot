@@ -27,6 +27,10 @@ from sleap_mot.utils import (
     compute_cosine_sim,
     compute_oks,
 )
+import logging
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 
 @attrs.define
@@ -178,6 +182,29 @@ class Tracker:
             is_local_queue=is_local_queue,
         )
         return tracker
+    
+    def initialize_tracker(self, context_frames: List[sio.Labels]):
+        """Clear the tracker queue and initialize the tracker with the first frame of the context frames."""
+        self.candidate.tracker_queue.clear()
+        
+        current_instances = []
+        for lf in context_frames:
+            untracked_instances = lf.instances
+            current_instances.extend(self.get_features(untracked_instances, lf.frame_idx, lf.image))
+
+        for inst in current_instances:
+            track_name = int(inst.src_instance.track.name.split("_")[1])
+
+            inst.track_id = track_name
+            if track_name not in self.candidate.tracker_queue:
+                self.candidate.tracker_queue[track_name] = deque(
+                    maxlen=self.candidate.window_size
+                )
+                self._track_objects[track_name] = inst.src_instance.track
+            self.candidate.tracker_queue[track_name].append(inst)
+
+            if track_name not in self.candidate.current_tracks:
+                self.candidate.current_tracks.append(track_name)
 
     def track(self, labels: sio.Labels, inplace: bool = False):
         """Track instances across frames."""
@@ -186,10 +213,24 @@ class Tracker:
 
         can_load_images = labels.video.exists()
 
+        context_frames = deque(maxlen=self.candidate.window_size)
+        prev_frame_untracked = True
         for lf in labels:
-            img = lf.image if can_load_images else None
-            lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
+            if lf.frame_idx % 100 == 0:
+                logging.debug(f"Processing frame: {lf.frame_idx}")
 
+            if all(inst.track is not None for inst in lf.instances):
+                if prev_frame_untracked:
+                    context_frames.clear()
+                    prev_frame_untracked = False
+                context_frames.append(lf)
+
+            else:
+                if not prev_frame_untracked:
+                    self.initialize_tracker(context_frames)
+                    prev_frame_untracked = True
+                img = lf.image if can_load_images else None
+                lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
         labels.update()
         return labels
 
