@@ -215,7 +215,7 @@ class Tracker:
         if has_tracks:
             if not self.candidate.current_tracks:
                 current_tracked_instances = self.candidate.add_new_tracks(
-                    current_instances
+                    current_instances, maintain_track_ids=True
                 )
 
             else:

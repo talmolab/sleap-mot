@@ -84,7 +84,10 @@ class FixedWindowCandidates:
         return new_track_id
 
     def add_new_tracks(
-        self, current_instances: TrackInstances, add_to_queue: bool = True
+        self,
+        current_instances: TrackInstances,
+        add_to_queue: bool = True,
+        maintain_track_ids: bool = False,
     ) -> TrackInstances:
         """Add new track IDs to the `TrackInstances` object and to the tracker queue."""
         is_new_track = False
@@ -94,10 +97,15 @@ class FixedWindowCandidates:
                 and current_instances.track_ids[i] is None
             ):
                 is_new_track = True
-                if current_instances.src_instances[i].track is not None:
-                    new_tracks_id = int(
-                        current_instances.src_instances[i].track.name.split("_")[1]
-                    )
+                if (
+                    maintain_track_ids
+                    and current_instances.src_instances[i].track is not None
+                ):
+                    track_name = current_instances.src_instances[i].track.name
+                    track_numbers = [
+                        int(s) for s in track_name.split("_") if s.isdigit()
+                    ]
+                    new_tracks_id = int("".join(map(str, track_numbers)))
                 else:
                     new_tracks_id = self.get_new_track_id()
                 current_instances.track_ids[i] = new_tracks_id

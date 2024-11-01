@@ -99,14 +99,20 @@ class LocalQueueCandidates:
         return new_track_id
 
     def add_new_tracks(
-        self, current_instances: List[TrackInstanceLocalQueue]
+        self,
+        current_instances: List[TrackInstanceLocalQueue],
+        maintain_track_ids: bool = False,
     ) -> List[TrackInstanceLocalQueue]:
         """Add new track IDs to the `TrackInstanceLocalQueue` objects and to the tracker queue."""
         track_instances = []
         for t in current_instances:
             if t.instance_score > self.instance_score_threshold:
-                if t.src_instance.track is not None:
-                    new_track_id = int(t.src_instance.track.name.split("_")[1])
+                if maintain_track_ids and t.src_instance.track is not None:
+                    track_name = t.src_instance.track.name
+                    track_numbers = [
+                        int(s) for s in track_name.split("_") if s.isdigit()
+                    ]
+                    new_track_id = int("".join(map(str, track_numbers)))
                 else:
                     new_track_id = self.get_new_track_id()
                 t.track_id = new_track_id
