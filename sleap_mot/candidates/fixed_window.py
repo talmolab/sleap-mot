@@ -94,7 +94,12 @@ class FixedWindowCandidates:
                 and current_instances.track_ids[i] is None
             ):
                 is_new_track = True
-                new_tracks_id = self.get_new_track_id()
+                if current_instances.src_instances[i].track is not None:
+                    new_tracks_id = int(
+                        current_instances.src_instances[i].track.name.split("_")[1]
+                    )
+                else:
+                    new_tracks_id = self.get_new_track_id()
                 current_instances.track_ids[i] = new_tracks_id
                 current_instances.tracking_scores[i] = 1.0
                 self.current_tracks.append(new_tracks_id)

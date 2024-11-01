@@ -105,7 +105,10 @@ class LocalQueueCandidates:
         track_instances = []
         for t in current_instances:
             if t.instance_score > self.instance_score_threshold:
-                new_track_id = self.get_new_track_id()
+                if t.src_instance.track is not None:
+                    new_track_id = int(t.src_instance.track.name.split("_")[1])
+                else:
+                    new_track_id = self.get_new_track_id()
                 t.track_id = new_track_id
                 t.tracking_score = 1.0
                 self.current_tracks.append(new_track_id)

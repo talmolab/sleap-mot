@@ -203,20 +203,51 @@ class Tracker:
         # get features for the untracked instances.
         current_instances = self.get_features(untracked_instances, frame_idx, image)
 
-        if any(inst.src_instance.track is not None for inst in current_instances):
-            current_tracked_instances = []
-            for inst in current_instances:
-                track_name = int(inst.src_instance.track.name.split("_")[1])
+        if self.is_local_queue:
+            has_tracks = any(
+                inst.src_instance.track is not None for inst in current_instances
+            )
+        else:
+            has_tracks = any(
+                inst.track is not None for inst in current_instances.src_instances
+            )
 
-                inst.track_id = track_name
-                current_tracked_instances.append(inst)
-                self.candidate.tracker_queue[track_name] = deque(
-                    maxlen=self.candidate.window_size
+        if has_tracks:
+            if not self.candidate.current_tracks:
+                current_tracked_instances = self.candidate.add_new_tracks(
+                    current_instances
                 )
-                self.candidate.tracker_queue[track_name].append(inst)
 
-                if track_name not in self.candidate.current_tracks:
-                    self.candidate.current_tracks.append(track_name)
+            else:
+                if self.is_local_queue:
+                    cost_matrix = np.ones(
+                        (len(current_instances), len(self.candidate.current_tracks))
+                    )
+                    for i, inst in enumerate(current_instances):
+                        if inst.src_instance.track is not None:
+                            track_name = int(inst.src_instance.track.name.split("_")[1])
+                            cost_matrix[i][
+                                track_name
+                            ] = 0  # No cost for keeping the same track
+
+                else:
+                    cost_matrix = np.ones(
+                        (
+                            len(current_instances.src_instances),
+                            len(self.candidate.current_tracks),
+                        )
+                    )
+                    for i, inst in enumerate(current_instances.src_instances):
+                        if inst.track is not None:
+                            track_name = int(inst.track.name.split("_")[1])
+
+                            cost_matrix[i][
+                                track_name
+                            ] = 0  # No cost for keeping the same track
+
+                current_tracked_instances = self.assign_tracks(
+                    current_instances, cost_matrix
+                )
 
         else:
             candidates_list = self.generate_candidates()
