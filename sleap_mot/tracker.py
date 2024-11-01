@@ -29,8 +29,9 @@ from sleap_mot.utils import (
 )
 import logging
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 @attrs.define
@@ -182,15 +183,17 @@ class Tracker:
             is_local_queue=is_local_queue,
         )
         return tracker
-    
+
     def initialize_tracker(self, context_frames: List[sio.Labels]):
         """Clear the tracker queue and initialize the tracker with the first frame of the context frames."""
         self.candidate.tracker_queue.clear()
-        
+
         current_instances = []
         for lf in context_frames:
             untracked_instances = lf.instances
-            current_instances.extend(self.get_features(untracked_instances, lf.frame_idx, lf.image))
+            current_instances.extend(
+                self.get_features(untracked_instances, lf.frame_idx, lf.image)
+            )
 
         for inst in current_instances:
             track_name = int(inst.src_instance.track.name.split("_")[1])
