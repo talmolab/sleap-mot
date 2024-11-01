@@ -21,6 +21,7 @@ dependencies:
   - python-build
   - jupyterlab
   - seaborn
+  - motmetrics
   - pip
   - pip:
     - "--editable=.[dev]"
