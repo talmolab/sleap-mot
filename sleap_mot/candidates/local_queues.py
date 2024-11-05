@@ -145,9 +145,9 @@ class LocalQueueCandidates:
                 current_instances[row].track_id = col
                 current_instances[row].tracking_score = tracking_scores[idx]
 
-            for track_instance in current_instances:
-                if track_instance.track_id is not None:
-                    self.tracker_queue[track_instance.track_id].append(track_instance)
+            # for track_instance in current_instances:
+            #     if track_instance.track_id is not None:
+            #         self.tracker_queue[track_instance.track_id].append(track_instance)
 
             # Create new tracks for instances with unassigned tracks from track matching
             new_current_instances_inds = [
