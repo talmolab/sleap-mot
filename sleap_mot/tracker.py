@@ -219,7 +219,7 @@ class Tracker:
         context_frames = deque(maxlen=self.candidate.window_size)
         prev_frame_untracked = True
         for lf in labels:
-            if lf.frame_idx % 100 == 0:
+            if lf.frame_idx % 500 == 0:
                 logging.debug(f"Processing frame: {lf.frame_idx}")
 
             if all(inst.track is not None for inst in lf.instances):
