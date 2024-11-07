@@ -220,22 +220,21 @@ class Tracker:
         first_bout = []
         untracked_frames = []
         second_bout = []
-        first_bout_exists = True
 
         for lf in labels:
-            if lf.frame_idx % 500 == 0:
+            if lf.frame_idx % 10000 == 0:
                 logging.debug(f"Processing frame: {lf.frame_idx}")
 
             if all(inst.track is not None for inst in lf.instances):
-                prev_frame_tracked = True
-                second_bout.append(lf)
+                if (len(untracked_frames) != 0):
+                    second_bout.append(lf)
+                    prev_frame_tracked = True
+                else:
+                    first_bout.append(lf)
 
             else:
-                if lf.frame_idx == 0:
-                    first_bout_exists = False
-
                 if prev_frame_tracked:
-                    if first_bout_exists:
+                    if len(first_bout) != 0:
                         half_idx = len(untracked_frames) // 2
 
                         if len(first_bout) > 5:
@@ -252,7 +251,6 @@ class Tracker:
 
                     else:
                         half_idx = 0
-                        first_bout_exists = True
 
                     if len(second_bout) > 5:
                         self.initialize_tracker(second_bout[:5])
@@ -270,6 +268,34 @@ class Tracker:
                     prev_frame_tracked = False
                 untracked_frames.append(lf)
 
+        if len(second_bout) != 0:
+            half_idx = len(untracked_frames) // 2
+
+            if len(second_bout) > 5:
+                self.initialize_tracker(second_bout[:5])
+            else:
+                self.initialize_tracker(second_bout)
+            for untracked_lf in untracked_frames[half_idx:]:
+                img = untracked_lf.image if can_load_images else None
+                untracked_lf.instances = self.track_frame(
+                    untracked_lf.instances, untracked_lf.frame_idx, image=img
+                )
+        else:
+            half_idx = len(untracked_frames)
+
+        if len(first_bout) != 0:
+            if len(first_bout) > 5:
+                self.initialize_tracker(first_bout[-5:])
+            else:
+                self.initialize_tracker(first_bout)
+            for untracked_lf in untracked_frames[:half_idx]:
+                img = untracked_lf.image if can_load_images else None
+                untracked_lf.instances = self.track_frame(
+                    untracked_lf.instances,
+                    untracked_lf.frame_idx,
+                    image=img,
+                )
+        
         if len(untracked_frames) == len(labels):
             for untracked_lf in untracked_frames:
                 img = untracked_lf.image if can_load_images else None
