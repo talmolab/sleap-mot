@@ -5,8 +5,8 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
-from copy import deepcopy
 from collections import deque
+import threading
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -220,44 +220,67 @@ class Tracker:
             self.initialize_tracker(bout[-5:] if len(bout) > 5 else bout)
             for untracked_lf in untracked_frames[start:end]:
                 img = untracked_lf.image if can_load_images else None
-                untracked_lf.instances = self.track_frame(
-                    untracked_lf.instances, untracked_lf.frame_idx, image=img
-                )
+                try:
+                    if untracked_lf.frame_idx % 1000 == 0:
+                        print(f"Tracking frame: {untracked_lf.frame_idx}", flush=True)
+                    untracked_lf.instances = self.track_frame(
+                        untracked_lf.instances, untracked_lf.frame_idx, image=img
+                    )
+                except Exception as e:
+                    print(
+                        f"Error tracking frame {untracked_lf.frame_idx}: {e}",
+                        flush=True,
+                    )
 
-        first_bout, untracked_frames, second_bout = [], [], []
-        prev_frame_tracked = False
+        tracked_frames, untracked_frames = [], []
+        untracked_frames_grouped = []
+        tracked_frames_grouped = []
+        prev_frame_tracked = True
 
         for lf in labels:
-            if lf.frame_idx % 10000 == 0:
-                logging.debug(f"Processing frame: {lf.frame_idx}")
+            if lf.instances and all(inst.track is not None for inst in lf.instances):
+                if not prev_frame_tracked:
+                    tracked_frames_grouped.append(tracked_frames)
+                    tracked_frames = []
 
-            if all(inst.track is not None for inst in lf.instances):
-                if len(untracked_frames) != 0:
-                    second_bout.append(lf)
-                    prev_frame_tracked = True
-                else:
-                    first_bout.append(lf)
+                tracked_frames.append(lf)
+                prev_frame_tracked = True
 
             else:
-                if prev_frame_tracked:
-                    half_idx = len(untracked_frames) // 2 if first_bout else 0
+                if prev_frame_tracked and untracked_frames:
+                    untracked_frames_grouped.append(untracked_frames)
+                    untracked_frames = []
 
-                    if first_bout:
-                        initialize_and_track(first_bout, untracked_frames, 0, half_idx)
-
-                    initialize_and_track(second_bout, untracked_frames, half_idx, None)
-
-                    first_bout, second_bout = second_bout, []
-                    untracked_frames, prev_frame_tracked = [], False
                 untracked_frames.append(lf)
+                prev_frame_tracked = False
 
-        half_idx = len(untracked_frames) // 2 if second_bout else len(untracked_frames)
-        if second_bout:
-            initialize_and_track(second_bout, untracked_frames, half_idx, None)
-        if first_bout:
-            initialize_and_track(first_bout, untracked_frames, 0, half_idx)
-        elif len(untracked_frames) == len(labels):
-            initialize_and_track([], untracked_frames, 0, None)
+        tracked_frames_grouped.append(tracked_frames)
+        untracked_frames_grouped.append(untracked_frames)
+
+        for i in range(len(untracked_frames_grouped)):
+            first_bout = (
+                tracked_frames_grouped[i] if i < len(tracked_frames_grouped) else []
+            )
+            second_bout = (
+                tracked_frames_grouped[i + 1]
+                if i + 1 < len(tracked_frames_grouped)
+                else []
+            )
+            untracked_bout = untracked_frames_grouped[i]
+
+            if first_bout and second_bout:
+                half_idx = len(untracked_bout) // 2
+            elif first_bout:
+                half_idx = len(untracked_bout)
+            else:
+                half_idx = 0
+
+            if first_bout:
+                initialize_and_track(first_bout, untracked_bout, 0, half_idx)
+            if second_bout:
+                initialize_and_track(second_bout, untracked_bout, half_idx, None)
+            if not first_bout and not second_bout:
+                initialize_and_track([], untracked_bout, 0, None)
 
         labels.update()
         return labels
