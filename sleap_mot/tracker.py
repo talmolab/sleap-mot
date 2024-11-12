@@ -5,8 +5,8 @@ from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
-from copy import deepcopy
 from collections import deque
+import threading
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -216,24 +216,72 @@ class Tracker:
 
         can_load_images = labels.video.exists()
 
-        context_frames = deque(maxlen=self.candidate.window_size)
-        prev_frame_untracked = True
-        for lf in labels:
-            if lf.frame_idx % 100 == 0:
-                logging.debug(f"Processing frame: {lf.frame_idx}")
+        def initialize_and_track(bout, untracked_frames, start, end):
+            self.initialize_tracker(bout[-5:] if len(bout) > 5 else bout)
+            for untracked_lf in untracked_frames[start:end]:
+                img = untracked_lf.image if can_load_images else None
+                try:
+                    if untracked_lf.frame_idx % 1000 == 0:
+                        print(f"Tracking frame: {untracked_lf.frame_idx}", flush=True)
+                    untracked_lf.instances = self.track_frame(
+                        untracked_lf.instances, untracked_lf.frame_idx, image=img
+                    )
+                except Exception as e:
+                    print(
+                        f"Error tracking frame {untracked_lf.frame_idx}: {e}",
+                        flush=True,
+                    )
 
-            if all(inst.track is not None for inst in lf.instances):
-                if prev_frame_untracked:
-                    context_frames.clear()
-                    prev_frame_untracked = False
-                context_frames.append(lf)
+        tracked_frames, untracked_frames = [], []
+        untracked_frames_grouped = []
+        tracked_frames_grouped = []
+        prev_frame_tracked = True
+
+        for lf in labels:
+            if lf.instances and all(inst.track is not None for inst in lf.instances):
+                if not prev_frame_tracked:
+                    tracked_frames_grouped.append(tracked_frames)
+                    tracked_frames = []
+
+                tracked_frames.append(lf)
+                prev_frame_tracked = True
 
             else:
-                if not prev_frame_untracked:
-                    self.initialize_tracker(context_frames)
-                    prev_frame_untracked = True
-                img = lf.image if can_load_images else None
-                lf.instances = self.track_frame(lf.instances, lf.frame_idx, image=img)
+                if prev_frame_tracked and untracked_frames:
+                    untracked_frames_grouped.append(untracked_frames)
+                    untracked_frames = []
+
+                untracked_frames.append(lf)
+                prev_frame_tracked = False
+
+        tracked_frames_grouped.append(tracked_frames)
+        untracked_frames_grouped.append(untracked_frames)
+
+        for i in range(len(untracked_frames_grouped)):
+            first_bout = (
+                tracked_frames_grouped[i] if i < len(tracked_frames_grouped) else []
+            )
+            second_bout = (
+                tracked_frames_grouped[i + 1]
+                if i + 1 < len(tracked_frames_grouped)
+                else []
+            )
+            untracked_bout = untracked_frames_grouped[i]
+
+            if first_bout and second_bout:
+                half_idx = len(untracked_bout) // 2
+            elif first_bout:
+                half_idx = len(untracked_bout)
+            else:
+                half_idx = 0
+
+            if first_bout:
+                initialize_and_track(first_bout, untracked_bout, 0, half_idx)
+            if second_bout:
+                initialize_and_track(second_bout, untracked_bout, half_idx, None)
+            if not first_bout and not second_bout:
+                initialize_and_track([], untracked_bout, 0, None)
+
         labels.update()
         return labels
 
@@ -247,69 +295,20 @@ class Tracker:
         # get features for the untracked instances.
         current_instances = self.get_features(untracked_instances, frame_idx, image)
 
-        if self.is_local_queue:
-            has_tracks = any(
-                inst.src_instance.track is not None for inst in current_instances
+        candidates_list = self.generate_candidates()
+
+        if candidates_list:
+            candidates_feature_dict = self.update_candidates(candidates_list, image)
+
+            scores = self.get_scores(current_instances, candidates_feature_dict)
+            cost_matrix = self.scores_to_cost_matrix(scores)
+
+            current_tracked_instances = self.assign_tracks(
+                current_instances, cost_matrix
             )
-        else:
-            has_tracks = any(
-                inst.track is not None for inst in current_instances.src_instances
-            )
-
-        if has_tracks:
-            if not self.candidate.current_tracks:
-                current_tracked_instances = self.candidate.add_new_tracks(
-                    current_instances, maintain_track_ids=True
-                )
-
-            else:
-                if self.is_local_queue:
-                    cost_matrix = np.ones(
-                        (len(current_instances), len(self.candidate.current_tracks))
-                    )
-                    for i, inst in enumerate(current_instances):
-                        if inst.src_instance.track is not None:
-                            track_name = int(inst.src_instance.track.name.split("_")[1])
-                            cost_matrix[i][
-                                track_name
-                            ] = 0  # No cost for keeping the same track
-
-                else:
-                    cost_matrix = np.ones(
-                        (
-                            len(current_instances.src_instances),
-                            len(self.candidate.current_tracks),
-                        )
-                    )
-                    for i, inst in enumerate(current_instances.src_instances):
-                        if inst.track is not None:
-                            track_name = int(inst.track.name.split("_")[1])
-
-                            cost_matrix[i][
-                                track_name
-                            ] = 0  # No cost for keeping the same track
-
-                current_tracked_instances = self.assign_tracks(
-                    current_instances, cost_matrix
-                )
 
         else:
-            candidates_list = self.generate_candidates()
-
-            if candidates_list:
-                candidates_feature_dict = self.update_candidates(candidates_list, image)
-
-                scores = self.get_scores(current_instances, candidates_feature_dict)
-                cost_matrix = self.scores_to_cost_matrix(scores)
-
-                current_tracked_instances = self.assign_tracks(
-                    current_instances, cost_matrix
-                )
-
-            else:
-                current_tracked_instances = self.candidate.add_new_tracks(
-                    current_instances
-                )
+            current_tracked_instances = self.candidate.add_new_tracks(current_instances)
 
         # Convert the `current_instances` back to `List[sio.PredictedInstance]` objects.
         if self.is_local_queue:
