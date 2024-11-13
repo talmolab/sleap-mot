@@ -123,6 +123,7 @@ class FixedWindowCandidates:
         row_inds: np.array,
         col_inds: np.array,
         tracking_scores: List[float],
+        add_to_queue: bool = False,
     ) -> TrackInstances:
         """Assign tracks to `TrackInstances` based on the output of track matching algorithm.
 
@@ -135,15 +136,16 @@ class FixedWindowCandidates:
 
         """
         add_to_queue = True
-        if np.any(row_inds) and np.any(col_inds):
+        if np.any(row_inds) or np.any(col_inds):
 
             for idx, (row, col) in enumerate(zip(row_inds, col_inds)):
                 current_instances.track_ids[row] = col
                 current_instances.tracking_scores[row] = tracking_scores[idx]
 
             # update tracks to queue
-            self.tracker_queue.append(current_instances)
-            add_to_queue = False
+            if add_to_queue:
+                self.tracker_queue.append(current_instances)
+                add_to_queue: bool = False,
 
             # Create new tracks for instances with unassigned tracks from track matching
             new_current_instances_inds = [

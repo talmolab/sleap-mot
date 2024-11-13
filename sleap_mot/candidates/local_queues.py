@@ -129,6 +129,7 @@ class LocalQueueCandidates:
         row_inds: np.ndarray,
         col_inds: np.ndarray,
         tracking_scores: List[float],
+        add_to_queue: bool = False,
     ) -> List[TrackInstanceLocalQueue]:
         """Assign tracks to `TrackInstanceLocalQueue` objects based on the output of track matching algorithm.
 
@@ -140,14 +141,15 @@ class LocalQueueCandidates:
             tracking_scores: List of tracking scores from the cost matrix.
 
         """
-        if np.any(row_inds) and np.any(col_inds):
+        if row_inds is not None and col_inds is not None:
             for idx, (row, col) in enumerate(zip(row_inds, col_inds)):
                 current_instances[row].track_id = col
                 current_instances[row].tracking_score = tracking_scores[idx]
 
-            # for track_instance in current_instances:
-            #     if track_instance.track_id is not None:
-            #         self.tracker_queue[track_instance.track_id].append(track_instance)
+        if add_to_queue:
+            for track_instance in current_instances:
+                if track_instance.track_id is not None:
+                    self.tracker_queue[track_instance.track_id].append(track_instance)
 
             # Create new tracks for instances with unassigned tracks from track matching
             new_current_instances_inds = [
