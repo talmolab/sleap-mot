@@ -32,6 +32,7 @@ import logging
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
 
 @attrs.define
@@ -217,20 +218,35 @@ class Tracker:
         can_load_images = labels.video.exists()
 
         def initialize_and_track(bout, untracked_frames, start, end):
-            self.initialize_tracker(bout[-5:] if len(bout) > 5 else bout)
-            for untracked_lf in untracked_frames[start:end]:
+            self.initialize_tracker(bout)
+            if len(untracked_frames) > 1000 or len(untracked_frames) == len(labels):
+                add_to_queue = True
+            else:
+                add_to_queue = False
+            if (
+                len(self.candidate.tracker_queue) > 0
+                and 0 in self.candidate.tracker_queue
+                and len(self.candidate.tracker_queue[0]) > 0
+            ):
+                if (
+                    self.candidate.tracker_queue[0][0].frame_idx
+                    > untracked_frames[end - 1].frame_idx
+                ):
+                    # Track frames in reverse order from end to start
+                    untracked_frames = reversed(untracked_frames[start:end])
+                else:
+                    untracked_frames = untracked_frames[start:end]
+
+            for untracked_lf in untracked_frames:
                 img = untracked_lf.image if can_load_images else None
-                try:
-                    if untracked_lf.frame_idx % 1000 == 0:
-                        print(f"Tracking frame: {untracked_lf.frame_idx}", flush=True)
-                    untracked_lf.instances = self.track_frame(
-                        untracked_lf.instances, untracked_lf.frame_idx, image=img
-                    )
-                except Exception as e:
-                    print(
-                        f"Error tracking frame {untracked_lf.frame_idx}: {e}",
-                        flush=True,
-                    )
+                # if untracked_lf.frame_idx % 1000 == 0:
+                #     logger.info(f"Tracking frame: {untracked_lf.frame_idx}")
+                untracked_lf.instances = self.track_frame(
+                    untracked_lf.instances,
+                    untracked_lf.frame_idx,
+                    image=img,
+                    add_to_queue=add_to_queue,
+                )
 
         tracked_frames, untracked_frames = [], []
         untracked_frames_grouped = []
@@ -276,9 +292,23 @@ class Tracker:
                 half_idx = 0
 
             if first_bout:
-                initialize_and_track(first_bout, untracked_bout, 0, half_idx)
+                initialize_and_track(
+                    first_bout[-5:] if len(first_bout) >= 5 else first_bout,
+                    untracked_bout,
+                    0,
+                    half_idx,
+                )
             if second_bout:
-                initialize_and_track(second_bout, untracked_bout, half_idx, None)
+                initialize_and_track(
+                    list(
+                        reversed(
+                            second_bout[:5] if len(second_bout) >= 5 else second_bout
+                        )
+                    ),
+                    untracked_bout,
+                    half_idx,
+                    len(untracked_bout),
+                )
             if not first_bout and not second_bout:
                 initialize_and_track([], untracked_bout, 0, None)
 
@@ -290,6 +320,7 @@ class Tracker:
         untracked_instances: List[sio.PredictedInstance],
         frame_idx: int,
         image: np.ndarray = None,
+        add_to_queue: bool = False,
     ) -> List[sio.PredictedInstance]:
         """Assign track IDs to the untracked list of `sio.PredictedInstance` objects."""
         # get features for the untracked instances.
@@ -304,7 +335,7 @@ class Tracker:
             cost_matrix = self.scores_to_cost_matrix(scores)
 
             current_tracked_instances = self.assign_tracks(
-                current_instances, cost_matrix
+                current_instances, cost_matrix, add_to_queue
             )
 
         else:
@@ -459,6 +490,7 @@ class Tracker:
         self,
         current_instances: Union[TrackInstances, List[TrackInstanceLocalQueue]],
         cost_matrix: np.ndarray,
+        add_to_queue: bool = False,
     ) -> Union[TrackInstances, List[TrackInstanceLocalQueue]]:
         """Assign track IDs using Hungarian method.
 
@@ -486,7 +518,7 @@ class Tracker:
         # update the candidates tracker queue with the newly tracked instances and assign
         # track IDs to `current_instances`.
         current_tracked_instances = self.candidate.update_tracks(
-            current_instances, row_inds, col_inds, tracking_scores
+            current_instances, row_inds, col_inds, tracking_scores, add_to_queue
         )
 
         return current_tracked_instances
