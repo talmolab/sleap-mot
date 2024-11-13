@@ -139,7 +139,7 @@ class LocalQueueCandidates:
                 track.
             col_inds: List of track IDs that have been assigned a new instance.
             tracking_scores: List of tracking scores from the cost matrix.
-
+            add_to_queue: Boolean to add the `current_instances` to the tracker queue.
         """
         if row_inds is not None and col_inds is not None:
             for idx, (row, col) in enumerate(zip(row_inds, col_inds)):
