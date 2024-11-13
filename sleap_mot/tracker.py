@@ -274,7 +274,6 @@ class Tracker:
         untracked_frames_grouped.append(untracked_frames)
 
         for i in range(len(untracked_frames_grouped)):
-            # logger.info(f"Tracking bout: {i}")
             first_bout = (
                 tracked_frames_grouped[i] if i < len(tracked_frames_grouped) else []
             )
