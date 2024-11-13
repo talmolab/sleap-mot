@@ -145,7 +145,7 @@ class FixedWindowCandidates:
             # update tracks to queue
             if add_to_queue:
                 self.tracker_queue.append(current_instances)
-                add_to_queue: bool = False,
+                add_to_queue: bool = (False,)
 
             # Create new tracks for instances with unassigned tracks from track matching
             new_current_instances_inds = [
