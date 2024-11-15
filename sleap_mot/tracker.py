@@ -220,7 +220,9 @@ class Tracker:
         n_frames = labels.video.shape[0]
         sorted_labels = []
         for frame_idx in range(n_frames):
-            sorted_labels.append(labels.find(frame_idx=frame_idx, video=labels.video, return_new=True)[0])
+            sorted_labels.append(
+                labels.find(frame_idx=frame_idx, video=labels.video, return_new=True)[0]
+            )
 
         labels.labeled_frames = sorted_labels
 
