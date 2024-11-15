@@ -23,5 +23,6 @@ dependencies:
   - seaborn
   - motmetrics
   - pip
+  - scikit-learn
   - pip:
     - "--editable=.[dev]"
