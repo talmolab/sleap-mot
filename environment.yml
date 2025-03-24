@@ -24,5 +24,6 @@ dependencies:
   - motmetrics
   - pip
   - scikit-learn
+  - tqdm
   - pip:
     - "--editable=.[dev]"

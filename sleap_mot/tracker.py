@@ -186,7 +186,18 @@ class Tracker:
         return tracker
 
     def initialize_tracker(self, context_frames: List[sio.Labels]):
-        """Clear the tracker queue and initialize the tracker with the first frame of the context frames."""
+        """Initialize the tracker with context frames.
+
+        This method clears the existing tracker queue and initializes the tracker with the provided context frames.
+        The context frames are used to establish initial tracks and their features.
+
+        Args:
+            context_frames (List[sio.Labels]): A list of labeled frames containing tracked instances to initialize
+                the tracker with. Each frame should have instances with track IDs already assigned.
+
+        Returns:
+            None
+        """
         self.candidate.tracker_queue.clear()
 
         current_instances = []
@@ -211,7 +222,19 @@ class Tracker:
                 self.candidate.current_tracks.append(track_name)
 
     def track(self, labels: sio.Labels, inplace: bool = False):
-        """Track instances across frames."""
+        """Track instances across frames.
+
+        This method tracks instances across frames in the provided `sio.Labels` object.
+        It supports single-video labels and allows for in-place updates of the labels.
+
+        Args:
+            labels (sio.Labels): The labeled frames to track.
+            inplace (bool): If True, the labels are updated in place. Default: False.
+
+        Returns:
+            sio.Labels: The updated labeled frames with track IDs assigned.
+        """
+
         if len(labels.videos) > 1:
             raise NotImplementedError("Multiple videos are not supported.")
 
@@ -227,16 +250,33 @@ class Tracker:
         labels.labeled_frames = sorted_labels
 
         def initialize_and_track(bout, untracked_frames, start, end):
+            """Initialize the tracker and track instances across frames.
+
+            This helper function initializes the tracker with the provided context frames
+            and tracks instances across the untracked frames.
+
+            Args:
+                bout (List[sio.Labels]): The context frames to initialize the tracker with.
+                untracked_frames (List[sio.Labels]): The untracked frames to track.
+                start (int): The start index of the untracked frames.
+                end (int): The end index of the untracked frames.
+            """
+
+            # Initialize the tracker with context frames
             self.initialize_tracker(bout)
+
+            # For large gaps between tracked frames, enable queue addition to improve tracking
             if len(untracked_frames) > 1000 or len(untracked_frames) == len(labels):
                 add_to_queue = True
             else:
                 add_to_queue = False
+
             if (
                 len(self.candidate.tracker_queue) > 0
                 and 0 in self.candidate.tracker_queue
                 and len(self.candidate.tracker_queue[0]) > 0
             ):
+                # Compare frame indices to determine tracking direction
                 if (
                     self.candidate.tracker_queue[0][0].frame_idx
                     > untracked_frames[end - 1].frame_idx
@@ -246,10 +286,12 @@ class Tracker:
                 else:
                     untracked_frames = untracked_frames[start:end]
 
+            # Process each untracked frame
             for untracked_lf in untracked_frames:
                 img = untracked_lf.image if can_load_images else None
                 # if untracked_lf.frame_idx % 1000 == 0:
                 #     logger.info(f"Tracking frame: {untracked_lf.frame_idx}")
+
                 untracked_lf.instances = self.track_frame(
                     untracked_lf.instances,
                     untracked_lf.frame_idx,
@@ -257,13 +299,17 @@ class Tracker:
                     add_to_queue=add_to_queue,
                 )
 
+        # Initialize lists to store tracked and untracked frames
         tracked_frames, untracked_frames = [], []
         untracked_frames_grouped = []
         tracked_frames_grouped = []
         prev_frame_tracked = True
 
+        # Iterate through all frames and group them into tracked and untracked sequences
         for lf in labels:
+            # Check if frame has instances and all instances are tracked
             if lf.instances and all(inst.track is not None for inst in lf.instances):
+                # If previous frame was untracked, start new tracked group
                 if not prev_frame_tracked:
                     tracked_frames_grouped.append(tracked_frames)
                     tracked_frames = []
@@ -272,6 +318,8 @@ class Tracker:
                 prev_frame_tracked = True
 
             else:
+                # If previous frame was tracked and we have untracked frames,
+                # add them to grouped list and start new untracked group
                 if prev_frame_tracked and untracked_frames:
                     untracked_frames_grouped.append(untracked_frames)
                     untracked_frames = []
@@ -282,45 +330,61 @@ class Tracker:
         tracked_frames_grouped.append(tracked_frames)
         untracked_frames_grouped.append(untracked_frames)
 
+        # Process each group of untracked frames
         for i in range(len(untracked_frames_grouped)):
+            # Get the tracked frames before this untracked group (if any)
             first_bout = (
                 tracked_frames_grouped[i] if i < len(tracked_frames_grouped) else []
             )
+            # Get the tracked frames after this untracked group (if any)
             second_bout = (
                 tracked_frames_grouped[i + 1]
                 if i + 1 < len(tracked_frames_grouped)
                 else []
             )
+            # Get the current group of untracked frames
             untracked_bout = untracked_frames_grouped[i]
 
+            # Determine where to split the untracked frames for bidirectional tracking
             if first_bout and second_bout:
+                # If we have tracked frames on both sides, split in middle
                 half_idx = len(untracked_bout) // 2
             elif first_bout:
+                # If we only have tracked frames before, process all frames forward
                 half_idx = len(untracked_bout)
             else:
+                # If we only have tracked frames after, process all frames backward
                 half_idx = 0
 
+            # Track forward from previous tracked frames
             if first_bout:
                 initialize_and_track(
+                    # Use up to 5 previous tracked frames for initialization
                     first_bout[-5:] if len(first_bout) >= 5 else first_bout,
                     untracked_bout,
-                    0,
-                    half_idx,
+                    0,  # Start from beginning of untracked bout
+                    half_idx,  # Track up to middle or end
                 )
+
+            # Track backward from next tracked frames
             if second_bout:
                 initialize_and_track(
+                    # Use up to 5 next tracked frames (reversed) for initialization
                     list(
                         reversed(
                             second_bout[:5] if len(second_bout) >= 5 else second_bout
                         )
                     ),
                     untracked_bout,
-                    half_idx,
-                    len(untracked_bout),
+                    half_idx,  # Start from middle
+                    len(untracked_bout),  # Track to end
                 )
+
+            # If no tracked frames on either side, track all frames forward
             if not first_bout and not second_bout:
                 initialize_and_track([], untracked_bout, 0, None)
 
+        # Update the labels object with new tracking information
         labels.update()
         return labels
 
@@ -331,8 +395,22 @@ class Tracker:
         image: np.ndarray = None,
         add_to_queue: bool = False,
     ) -> List[sio.PredictedInstance]:
-        """Assign track IDs to the untracked list of `sio.PredictedInstance` objects."""
-        # get features for the untracked instances.
+        """Assign track IDs to the untracked list of `sio.PredictedInstance` objects.
+
+        This method assigns track IDs to the untracked instances in the provided list.
+        It first generates candidate features, updates the candidates list, computes
+        association scores, and then assigns track IDs using the Hungarian method.
+
+        Args:
+            untracked_instances (List[sio.PredictedInstance]): The list of untracked instances from frame_idx to assign track IDs to.
+            frame_idx (int): The index of the current frame.
+            image (np.ndarray): The image of the current frame.
+            add_to_queue (bool): If True, the instances will be added to the tracker queue.
+
+        Returns:
+            List[sio.PredictedInstance]: The list of instances with assigned track IDs.
+        """
+
         current_instances = self.get_features(untracked_instances, frame_idx, image)
 
         candidates_list = self.generate_candidates()

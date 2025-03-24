@@ -1,4 +1,4 @@
-"""Module for evaluation."""
+f"""Module for evaluation."""
 
 import numpy as np
 import motmetrics as mm
@@ -148,41 +148,42 @@ def get_metrics(df_gt_in, df_pred_in):
         how="inner",
     )
 
-    # initialize separate pymm accumulators for dreem and trackmate
+    # Initialize MOT metrics accumulator and tracking variables
     acc = mm.MOTAccumulator(auto_id=True)
     total_mislabeled_frames = 0
     mislabeled_frames = []
-    # now iterate over each frame and pass in gt,dreem,tm pred tracks into pymotmetrics
+
+    # Process each frame in the merged dataframe
     for frame, framedf in df_merged.groupby("frame_id"):
+        # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
 
-        # pass into pymotmetrics
+        # Check for any mismatches between ground truth and predictions
         for idx, gt_id in enumerate(gt_ids):
             if gt_id != pred_tracks[idx]:
                 total_mislabeled_frames += 1
                 mislabeled_frames.append(frame)
                 break
 
-        # define cost matrix of size num_gt_tracks x num_gt_tracks for gt vs dreem
-        # since our preds match with gt ids, so if dreem is correct, dreem id = gt id
+        # Create cost matrix for MOT metrics
+        # NaN indicates no association, 1 indicates perfect match
         cost_gt_pred = np.full((len(gt_ids), len(gt_ids)), np.nan)
         np.fill_diagonal(cost_gt_pred, 1)
 
+        # Update MOT accumulator with frame data
         acc.update(
-            oids=gt_ids,
-            hids=pred_tracks,
-            dists=cost_gt_pred,
+            oids=gt_ids,  # Ground truth object IDs
+            hids=pred_tracks,  # Hypothesis (predicted) IDs
+            dists=cost_gt_pred,  # Distance/cost matrix
         )
-    # Get the events log for all frames after processing
-    # all_events = acc.events
 
-    # Check for 'SWITCH' events in all frames
-    # switch_events = all_events[all_events['Type'] == 'SWITCH']
-    # get pymotmetrics summary
+    # Compute MOT metrics
     mh = mm.metrics.create()
     summary = mh.compute(acc, name="acc").transpose()
 
+    # If more than half the frames are mislabeled, flip the track ID values
+    # This handles cases where track IDs are labeled oppositely
     if total_mislabeled_frames > len(df_merged["frame_id"].unique()) / 2:
         total_mislabeled_frames = (
             len(df_merged["frame_id"].unique()) - total_mislabeled_frames
@@ -201,18 +202,22 @@ def get_metrics(df_gt_in, df_pred_in):
 
         # Update mislabeled_frames to be the list of correctly labeled frames
         mislabeled_frames = correctly_labeled_frames
-    # Group consecutive mislabeled frames
+
+    # Group consecutive mislabeled frames to analyze error patterns
     grouped_mislabeled_frames = []
     group_lengths = []
     if mislabeled_frames:
         current_group = [mislabeled_frames[0]]
         for frame in mislabeled_frames[1:]:
             if frame == current_group[-1] + 1:
+                # Add to current group if frames are consecutive
                 current_group.append(frame)
             else:
+                # Start new group if frames are not consecutive
                 grouped_mislabeled_frames.append(current_group)
                 group_lengths.append(len(current_group))
                 current_group = [frame]
+        # Add final group
         grouped_mislabeled_frames.append(current_group)
         group_lengths.append(len(current_group))
 
