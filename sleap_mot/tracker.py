@@ -61,6 +61,7 @@ class Tracker:
         is_local_queue: `True` if `LocalQueueCandidates` is used else `False`.
 
     """
+
     candidate: Union[FixedWindowCandidates, LocalQueueCandidates] = (
         FixedWindowCandidates()
     )
@@ -643,6 +644,7 @@ class FlowShiftTracker(Tracker):
             Default: 3
 
     """
+
     img_scale: float = 1.0
     of_window_size: int = 21
     of_max_levels: int = 3
