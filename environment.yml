@@ -14,7 +14,7 @@ dependencies:
   # Dev dependencies
   - pytest
   - pytest-cov
-  - pytest-watch
+  # - pytest-watch<4.2.0
   - black
   - pydocstyle
   - toml
