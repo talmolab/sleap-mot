@@ -61,7 +61,6 @@ class Tracker:
         is_local_queue: `True` if `LocalQueueCandidates` is used else `False`.
 
     """
-
     candidate: Union[FixedWindowCandidates, LocalQueueCandidates] = (
         FixedWindowCandidates()
     )
@@ -234,7 +233,6 @@ class Tracker:
         Returns:
             sio.Labels: The updated labeled frames with track IDs assigned.
         """
-
         if len(labels.videos) > 1:
             raise NotImplementedError("Multiple videos are not supported.")
 
@@ -645,7 +643,6 @@ class FlowShiftTracker(Tracker):
             Default: 3
 
     """
-
     img_scale: float = 1.0
     of_window_size: int = 21
     of_max_levels: int = 3

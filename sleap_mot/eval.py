@@ -1,4 +1,4 @@
-f"""Module for evaluation."""
+"""Module for evaluation."""
 
 import numpy as np
 import motmetrics as mm
