@@ -27,4 +27,4 @@ dependencies:
   - scikit-learn
   - tqdm
   - pip:
-    - "--editable=.[dev]"
+    - "--editable=."
