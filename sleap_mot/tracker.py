@@ -261,7 +261,6 @@ class Tracker:
                 start (int): The start index of the untracked frames.
                 end (int): The end index of the untracked frames.
             """
-
             # Initialize the tracker with context frames
             self.initialize_tracker(bout)
 
@@ -410,7 +409,6 @@ class Tracker:
         Returns:
             List[sio.PredictedInstance]: The list of instances with assigned track IDs.
         """
-
         current_instances = self.get_features(untracked_instances, frame_idx, image)
 
         candidates_list = self.generate_candidates()
