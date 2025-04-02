@@ -190,6 +190,18 @@ class Tracker:
         return tracker
 
     def initialize_tracker(self, tracks, frame_idx, labels):
+        """Initialize tracker with existing tracks.
+
+        Args:
+            tracks: List of tracks to initialize with
+            frame_idx: Index of current frame
+            labels: Labels object containing track information
+
+        This method initializes the tracker by:
+        1. Clearing the existing tracker queue
+        2. Finding up to 5 instances of each track in nearby frames
+        3. Adding those instances to the tracker queue with their track IDs
+        """
         self.candidate.tracker_queue.clear()
         current_instances = []
 
@@ -247,6 +259,18 @@ class Tracker:
                 self.candidate.current_tracks.append(track_name)
 
     def initialize_and_track(self, lf, labels):
+        """Initialize tracker and track instances in a labeled frame.
+
+        This method initializes the tracker with unassigned tracks and processes instances
+        in the current labeled frame, assigning track IDs to untracked instances.
+
+        Args:
+            lf (LabeledFrame): The current labeled frame to process
+            labels (Labels): The full untracked Labels object containing all frames and tracks
+
+        Returns:
+            list[Instance]: List of all instances in the frame with track IDs assigned
+        """
         tracks = labels.tracks
         curr_tracks = [
             inst.track.name for inst in lf.instances if inst.track is not None
