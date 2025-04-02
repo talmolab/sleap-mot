@@ -38,6 +38,7 @@ import copy
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
+
 @attrs.define
 class Tracker:
     """Simple Pose Tracker.
@@ -188,42 +189,6 @@ class Tracker:
         )
         return tracker
 
-    # def initialize_tracker(self, context_frames: List[sio.Labels]):
-    #     """Initialize the tracker with context frames.
-
-    #     This method clears the existing tracker queue and initializes the tracker with the provided context frames.
-    #     The context frames are used to establish initial tracks and their features.
-
-    #     Args:
-    #         context_frames (List[sio.Labels]): A list of labeled frames containing tracked instances to initialize
-    #             the tracker with. Each frame should have instances with track IDs already assigned.
-
-    #     Returns:
-    #         None
-    #     """
-    #     self.candidate.tracker_queue.clear()
-
-    #     current_instances = []
-    #     for lf in context_frames:
-    #         untracked_instances = lf.instances
-    #         current_instances.extend(
-    #             self.get_features(untracked_instances, lf.frame_idx, lf.image)
-    #         )
-
-    #     for inst in current_instances:
-    #         track_name = int(inst.src_instance.track.name.split("_")[1])
-
-    #         inst.track_id = track_name
-    #         if track_name not in self.candidate.tracker_queue:
-    #             self.candidate.tracker_queue[track_name] = deque(
-    #                 maxlen=self.candidate.window_size
-    #             )
-    #             self._track_objects[track_name] = inst.src_instance.track
-    #         self.candidate.tracker_queue[track_name].append(inst)
-
-    #         if track_name not in self.candidate.current_tracks:
-    #             self.candidate.current_tracks.append(track_name)
-
     def initialize_tracker(self, tracks, frame_idx, labels):
         self.candidate.tracker_queue.clear()
         current_instances = []
@@ -231,26 +196,42 @@ class Tracker:
         for track in tracks:
             # Find 5 closest frames with this track ID
             length = 0
-            before_frames = range(frame_idx - 1 , 0, -1)
+            before_frames = range(frame_idx - 1, 0, -1)
             after_frames = range(frame_idx + 1, len(labels.labeled_frames))
 
-            interleaved_frames = [f for pair in zip_longest(before_frames, after_frames, fillvalue=None) 
-                                for f in pair if f is not None]
-            
+            interleaved_frames = [
+                f
+                for pair in zip_longest(before_frames, after_frames, fillvalue=None)
+                for f in pair
+                if f is not None
+            ]
+
             # Search forward and backward from current frame
             for curr_frame in interleaved_frames:
-                lf = labels.find(frame_idx=curr_frame, video=labels.video, return_new=True)[0]
+                lf = labels.find(
+                    frame_idx=curr_frame, video=labels.video, return_new=True
+                )[0]
                 try:
-                    if any(inst.track is not None and inst.track.name == track.name for inst in lf.instances):
-                        instances = [inst for inst in lf.instances if inst.track and inst.track.name == track.name]
-                        current_instances.extend(self.get_features(instances, lf.frame_idx, lf.image))
+                    if any(
+                        inst.track is not None and inst.track.name == track.name
+                        for inst in lf.instances
+                    ):
+                        instances = [
+                            inst
+                            for inst in lf.instances
+                            if inst.track and inst.track.name == track.name
+                        ]
+                        current_instances.extend(
+                            self.get_features(instances, lf.frame_idx, lf.image)
+                        )
                         length += 1
                     if length == 5:
                         break
                 except Exception as e:
-                    raise RuntimeError(f"Error processing frame {curr_frame} for frame {frame_idx}: {e}")
-                    
-                        
+                    raise RuntimeError(
+                        f"Error processing frame {curr_frame} for frame {frame_idx}: {e}"
+                    )
+
         for inst in current_instances:
             track_name = inst.src_instance.track.name
 
@@ -267,9 +248,11 @@ class Tracker:
 
     def initialize_and_track(self, lf, labels):
         tracks = labels.tracks
-        curr_tracks = [inst.track for inst in lf.instances if inst.track is not None]
+        curr_tracks = [
+            inst.track.name for inst in lf.instances if inst.track is not None
+        ]
         # Get tracks that are in tracks but not in curr_tracks
-        unassigned_tracks = [track for track in tracks if track not in curr_tracks]
+        unassigned_tracks = [track for track in tracks if track.name not in curr_tracks]
 
         self.initialize_tracker(unassigned_tracks, lf.frame_idx, labels)
         untracked_instances = [inst for inst in lf.instances if inst.track is None]
@@ -285,8 +268,8 @@ class Tracker:
         )
 
         instances = tracked_instances + untracked_instances
-        return instances
 
+        return instances
 
     def track(self, labels: sio.Labels, inplace: bool = False):
         """Track instances across frames.
@@ -320,7 +303,7 @@ class Tracker:
         with ProcessPoolExecutor(max_workers=4) as executor:
             # Submit all frames for parallel processing
             futures = []
-            for lf_idx, lf in enumerate(labels):
+            for lf_idx, lf in enumerate(tracked_labels):
                 if lf.instances and any(inst.track is None for inst in lf.instances):
                     future = executor.submit(self.initialize_and_track, lf, labels)
                     futures.append((lf_idx, future))
@@ -328,164 +311,27 @@ class Tracker:
             # Process results as they complete
             for lf_idx, future in tqdm(futures, total=len(futures)):
                 tracked_labels.labeled_frames[lf_idx].instances = future.result()
-            
+
         # Process frames sequentially for debugging
-        # for lf_idx, lf in enumerate(labels[:10]):
+        # for lf_idx, lf in enumerate(tracked_labels[:100]):
         #     if lf.instances and any(inst.track is None for inst in lf.instances):
         #         logger.info(f"Initializing tracker for frame {lf_idx}")
         #         tracked_labels.labeled_frames[lf_idx].instances = self.initialize_and_track(lf, labels)
 
-        labels = tracked_labels
-
-        # def initialize_and_track(bout, untracked_frames, start, end):
-        #     """Initialize the tracker and track instances across frames.
-
-        #     This helper function initializes the tracker with the provided context frames
-        #     and tracks instances across the untracked frames.
-
-        #     Args:
-        #         bout (List[sio.Labels]): The context frames to initialize the tracker with.
-        #         untracked_frames (List[sio.Labels]): The untracked frames to track.
-        #         start (int): The start index of the untracked frames.
-        #         end (int): The end index of the untracked frames.
-        #     """
-        #     # Initialize the tracker with context frames
-        #     self.initialize_tracker(bout)
-
-        #     # For large gaps between tracked frames, enable queue addition to improve tracking
-        #     if len(untracked_frames) > 1000 or len(untracked_frames) == len(labels):
-        #         add_to_queue = True
-        #     else:
-        #         add_to_queue = False
-
-        #     if (
-        #         len(self.candidate.tracker_queue) > 0
-        #         and 0 in self.candidate.tracker_queue
-        #         and len(self.candidate.tracker_queue[0]) > 0
-        #     ):
-        #         # Compare frame indices to determine tracking direction
-        #         if (
-        #             self.candidate.tracker_queue[0][0].frame_idx
-        #             > untracked_frames[end - 1].frame_idx
-        #         ):
-        #             # Track frames in reverse order from end to start
-        #             untracked_frames = reversed(untracked_frames[start:end])
-        #         else:
-        #             untracked_frames = untracked_frames[start:end]
-
-        #     # Process each untracked frame
-        #     for untracked_lf in untracked_frames:
-        #         img = untracked_lf.image if can_load_images else None
-        #         # if untracked_lf.frame_idx % 1000 == 0:
-        #         #     logger.info(f"Tracking frame: {untracked_lf.frame_idx}")
-
-        #         untracked_lf.instances = self.track_frame(
-        #             untracked_lf.instances,
-        #             untracked_lf.frame_idx,
-        #             image=img,
-        #             add_to_queue=add_to_queue,
-        #         )
-
-        # Initialize lists to store tracked and untracked frames
-        # tracked_frames, untracked_frames = [], []
-        # untracked_frames_grouped = []
-        # tracked_frames_grouped = []
-        # prev_frame_tracked = True
-
-        # # Iterate through all frames and group them into tracked and untracked sequences
-        # for lf in labels:
-        #     # Check if frame has instances and all instances are tracked
-        #     if lf.instances and all(inst.track is not None for inst in lf.instances):
-        #         # If previous frame was untracked, start new tracked group
-        #         if not prev_frame_tracked:
-        #             tracked_frames_grouped.append(tracked_frames)
-        #             tracked_frames = []
-
-        #         tracked_frames.append(lf)
-        #         prev_frame_tracked = True
-
-        #     else:
-        #         # If previous frame was tracked and we have untracked frames,
-        #         # add them to grouped list and start new untracked group
-        #         if prev_frame_tracked and untracked_frames:
-        #             untracked_frames_grouped.append(untracked_frames)
-        #             untracked_frames = []
-
-        #         untracked_frames.append(lf)
-        #         prev_frame_tracked = False
-
-        # tracked_frames_grouped.append(tracked_frames)
-        # untracked_frames_grouped.append(untracked_frames)
-
-        # # Process each group of untracked frames
-        # for i in range(len(untracked_frames_grouped)):
-        #     # Get the tracked frames before this untracked group (if any)
-        #     first_bout = (
-        #         tracked_frames_grouped[i] if i < len(tracked_frames_grouped) else []
-        #     )
-        #     # Get the tracked frames after this untracked group (if any)
-        #     second_bout = (
-        #         tracked_frames_grouped[i + 1]
-        #         if i + 1 < len(tracked_frames_grouped)
-        #         else []
-        #     )
-        #     # Get the current group of untracked frames
-        #     untracked_bout = untracked_frames_grouped[i]
-
-        #     # Determine where to split the untracked frames for bidirectional tracking
-        #     if first_bout and second_bout:
-        #         # If we have tracked frames on both sides, split in middle
-        #         half_idx = len(untracked_bout) // 2
-        #     elif first_bout:
-        #         # If we only have tracked frames before, process all frames forward
-        #         half_idx = len(untracked_bout)
-        #     else:
-        #         # If we only have tracked frames after, process all frames backward
-        #         half_idx = 0
-
-        #     # Track forward from previous tracked frames
-        #     if first_bout:
-        #         initialize_and_track(
-        #             # Use up to 5 previous tracked frames for initialization
-        #             first_bout[-5:] if len(first_bout) >= 5 else first_bout,
-        #             untracked_bout,
-        #             0,  # Start from beginning of untracked bout
-        #             half_idx,  # Track up to middle or end
-        #         )
-
-        #     # Track backward from next tracked frames
-        #     if second_bout:
-        #         initialize_and_track(
-        #             # Use up to 5 next tracked frames (reversed) for initialization
-        #             list(
-        #                 reversed(
-        #                     second_bout[:5] if len(second_bout) >= 5 else second_bout
-        #                 )
-        #             ),
-        #             untracked_bout,
-        #             half_idx,  # Start from middle
-        #             len(untracked_bout),  # Track to end
-        #         )
-
-        #     # If no tracked frames on either side, track all frames forward
-        #     if not first_bout and not second_bout:
-        #         initialize_and_track([], untracked_bout, 0, None)
-
-        # Update the labels object with new tracking information
-
-
-        # labels.update()
-        # logger.info(f"len(labels.tracks) after update: {len(labels.tracks)}")
-
-        for lf in labels:
+        for lf in tracked_labels:
             for inst in lf.instances:
-                if inst.track is not None and inst.track not in labels.tracks:
-                    track = next(t for t in labels.tracks if t.name == inst.track.name)
-                    inst.track = track
+                if inst.track is not None:
+                    inst.track = next(
+                        t for t in tracked_labels.tracks if t.name == inst.track.name
+                    )
+                inst.skeleton = tracked_labels.skeleton
+                inst.points = {
+                    i: point for i, (node, point) in enumerate(inst.points.items())
+                }
 
-        labels.update()
+        tracked_labels.update()
 
-        return labels
+        return tracked_labels
 
     def track_frame(
         self,
@@ -703,29 +549,29 @@ class Tracker:
         tracking_scores = []
         matched_track_ids = []
         matched_instance_indices = []
-        
-        for instance_idx, instance in enumerate(current_instances):
-            best_track_id = None
-            best_score = -np.inf
-            
-            for track_id, costs in cost_matrix.items():
-                score = -costs[instance_idx] # Convert cost back to score
-                if score > best_score:
-                    best_score = score
-                    best_track_id = track_id
-            
-            if best_track_id is not None:
-                tracking_scores.append(best_score)
-                matched_track_ids.append(best_track_id) 
-                matched_instance_indices.append(instance_idx)
+        matching_method = self._track_matching_methods[self.track_matching_method]
+
+        # Convert cost_matrix dict to numpy array for Hungarian algorithm
+        track_ids = list(cost_matrix.keys())
+        costs_array = np.array([cost_matrix[tid] for tid in track_ids])
+
+        # Use Hungarian algorithm to find optimal matching
+        row_ind, col_ind = matching_method(costs_array)
+
+        for row, col in zip(row_ind, col_ind):
+            score = -costs_array[row, col]  # Convert cost back to score
+            if not np.isinf(score):  # Only match if cost was not inf
+                tracking_scores.append(score)
+                matched_track_ids.append(track_ids[row])
+                matched_instance_indices.append(col)
 
         # Update tracker queue and assign track IDs
         current_tracked_instances = self.candidate.update_tracks(
-            current_instances, 
+            current_instances,
             matched_instance_indices,
-            matched_track_ids, 
+            matched_track_ids,
             tracking_scores,
-            add_to_queue
+            add_to_queue,
         )
 
         return current_tracked_instances
