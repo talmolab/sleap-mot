@@ -208,7 +208,7 @@ class Tracker:
         for track in tracks:
             # Find 5 closest frames with this track ID
             length = 0
-            before_frames = range(frame_idx - 1, 0, -1)
+            before_frames = range(frame_idx - 1, -1, -1)
             after_frames = range(frame_idx + 1, len(labels.labeled_frames))
 
             interleaved_frames = [
@@ -271,12 +271,15 @@ class Tracker:
         Returns:
             list[Instance]: List of all instances in the frame with track IDs assigned
         """
-        tracks = labels.tracks
+        tracks = self._track_objects
         curr_tracks = [
             inst.track.name for inst in lf.instances if inst.track is not None
         ]
         # Get tracks that are in tracks but not in curr_tracks
-        unassigned_tracks = [track for track in tracks if track.name not in curr_tracks]
+
+        unassigned_tracks = [
+            tracks[track_name] for track_name in tracks if track_name not in curr_tracks
+        ]
 
         self.initialize_tracker(unassigned_tracks, lf.frame_idx, labels)
         untracked_instances = [inst for inst in lf.instances if inst.track is None]
@@ -324,23 +327,29 @@ class Tracker:
         tracked_labels = copy.deepcopy(labels)
 
         # Create a thread pool for parallel processing
-        with ProcessPoolExecutor(max_workers=4) as executor:
-            # Submit all frames for parallel processing
-            futures = []
-            for lf_idx, lf in enumerate(tracked_labels):
-                if lf.instances and any(inst.track is None for inst in lf.instances):
-                    future = executor.submit(self.initialize_and_track, lf, labels)
-                    futures.append((lf_idx, future))
+        # with ProcessPoolExecutor(max_workers=4) as executor:
+        #     # Submit all frames for parallel processing
+        #     futures = []
+        #     for lf_idx, lf in enumerate(tracked_labels):
+        #         if lf.instances and any(inst.track is None for inst in lf.instances):
+        #             future = executor.submit(self.initialize_and_track, lf, labels)
+        #             futures.append((lf_idx, future))
 
-            # Process results as they complete
-            for lf_idx, future in tqdm(futures, total=len(futures)):
-                tracked_labels.labeled_frames[lf_idx].instances = future.result()
+        #     # Process results as they complete
+        #     for lf_idx, future in tqdm(futures, total=len(futures)):
+        #         tracked_labels.labeled_frames[lf_idx].instances = future.result()
 
         # Process frames sequentially for debugging
-        # for lf_idx, lf in enumerate(tracked_labels[:100]):
-        #     if lf.instances and any(inst.track is None for inst in lf.instances):
-        #         logger.info(f"Initializing tracker for frame {lf_idx}")
-        #         tracked_labels.labeled_frames[lf_idx].instances = self.initialize_and_track(lf, labels)
+        for lf_idx, lf in enumerate(tracked_labels[:100]):
+            if lf.instances and any(inst.track is None for inst in lf.instances):
+                logger.info(f"Initializing tracker for frame {lf_idx}")
+                new_instances = self.initialize_and_track(lf, labels)
+                tracked_labels.labeled_frames[lf_idx].instances = new_instances
+                if inplace:
+                    labels.labeled_frames[lf_idx].instances = new_instances
+
+        labels.update()
+        tracked_labels.tracks = labels.tracks
 
         for lf in tracked_labels:
             for inst in lf.instances:
@@ -403,7 +412,7 @@ class Tracker:
                 if instance.track_id is not None:
                     if instance.track_id not in self._track_objects:
                         self._track_objects[instance.track_id] = sio.Track(
-                            f"track_{instance.track_id}"
+                            str(instance.track_id)
                         )
                     instance.src_instance.track = self._track_objects[instance.track_id]
                     instance.src_instance.tracking_score = instance.tracking_score

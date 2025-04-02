@@ -137,6 +137,8 @@ def test_score_and_assign(centered_pair_predictions):
     candidates_list = tracker.generate_candidates()
     candidate_feature_dict = tracker.update_candidates(candidates_list, None)
     scores = tracker.get_scores(track_instances, candidate_feature_dict)
+    # Convert scores dictionary to 2D array and ensure integer values
+    scores = np.array([scores[i] for i in range(len(scores))])
     np.testing.assert_array_almost_equal(scores, [[1, 0], [0, 1]])
 
     # Test assign_tracks()
@@ -164,6 +166,6 @@ def test_score_and_assign(centered_pair_predictions):
 def test_tracker_track(noisy_clip_predictions_untracked):
     tracker = Tracker.from_config(candidates_method="local_queues", max_tracks=2)
 
-    tracked_labels = tracker.track(noisy_clip_predictions_untracked, inplace=False)
+    tracked_labels = tracker.track(noisy_clip_predictions_untracked, inplace=True)
     assert len(tracked_labels) == len(noisy_clip_predictions_untracked)
     assert len(tracked_labels.tracks) == 2
