@@ -6,7 +6,6 @@ import attrs
 import cv2
 import numpy as np
 from collections import deque
-import threading
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -28,13 +27,11 @@ from sleap_mot.utils import (
     compute_oks,
 )
 import logging
-from itertools import zip_longest
 
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-import copy
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
@@ -128,7 +125,6 @@ class Tracker:
         of_img_scale: float = 1.0,
         of_window_size: int = 21,
         of_max_levels: int = 3,
-        global_track_ids: List[str] = None,
     ):
         """Create `Tracker` from config.
 
@@ -213,6 +209,19 @@ class Tracker:
     def update_track_id_and_queue(
         self, tracklet_id, global_track_id, frame_idx, labels
     ):
+        """Update track ID and queue for a tracklet.
+
+        Updates the track ID of a tracklet and its corresponding queue entries to use a new global track ID.
+        If the tracklet ID is not already in global_track_ids, updates the candidate's current tracks and
+        tracker queue to use the new global ID. Otherwise, updates the tracker queue with instances from
+        the recent frames.
+
+        Args:
+            tracklet_id (Track): The current track ID of the tracklet
+            global_track_id (Track): The new global track ID to assign
+            frame_idx (int): Current frame index
+            labels (Labels): Labels object containing tracked instances
+        """
         if tracklet_id.name not in self.global_track_ids:
             if tracklet_id.name in self.candidate.current_tracks:
                 self.candidate.current_tracks.remove(tracklet_id.name)
@@ -251,6 +260,21 @@ class Tracker:
                         self.candidate.tracker_queue[track_id].append(empty_instance)
 
     def get_tracklet(self, matching_instance, global_track_id, labels, frame_idx):
+        """Get the tracklet (sequence of instances) associated with a given instance.
+
+        Given an instance and global track ID, finds all consecutive instances in previous frames
+        that have the same track ID, up to 300 frames back. Stops if it encounters the global track ID
+        or if the matching instance's tracklet ID is already in global_track_ids.
+
+        Args:
+            matching_instance (Instance): The instance to find the tracklet for
+            global_track_id (Track): The global track ID being matched against
+            labels (Labels): Labels object containing tracked instances
+            frame_idx (int): Current frame index
+
+        Returns:
+            list[Instance] or None: List of instances in the tracklet if found, None if no matching instance
+        """
         if matching_instance:
             tracklet_id = matching_instance.track
             before_frames = [
@@ -274,6 +298,22 @@ class Tracker:
         return None
 
     def id_tracklet(self, tracked_instances, new_instances, labels, frame_idx):
+        """Update track IDs for a set of tracked instances.
+
+        Given a list of tracked instances with their global track IDs, updates the track IDs
+        of matching instances in the current frame. For each tracked instance, finds any matching
+        tracklets and updates their track IDs to use the global track ID.
+
+        Args:
+            tracked_instances (List[Tuple[np.ndarray, str]]): List of tuples containing instance
+                coordinates and their global track IDs
+            new_instances (List[Instance]): List of instances in current frame to update
+            labels (Labels): Labels object containing all tracked instances
+            frame_idx (int): Current frame index being processed
+
+        Returns:
+            List[Instance]: Updated list of instances with track IDs assigned
+        """
         for inst_numpy, global_track_name in tracked_instances:
             global_track_id = self._track_objects.get(global_track_name)
 
