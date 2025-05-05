@@ -24,7 +24,7 @@ def get_df(df, track_key):
             # make a dictionary for each instance
             frame_meta = {
                 "frame_id": lf.frame_idx,
-                track_key: inst.track.name[-1] if inst.track is not None else None,
+                track_key: inst.track.name if inst.track is not None else None,
             }
             points = inst.points
             for key in points:
@@ -61,7 +61,7 @@ def get_df(df, track_key):
     return return_df
 
 
-def get_metrics(df_gt_in, df_pred_in):
+def get_metrics(df_gt_in, df_pred_in, track_dict=None):
     """Get metrics for tracking using a ground truth (proofread) file and a predicted file.
 
     Args:
@@ -76,99 +76,66 @@ def get_metrics(df_gt_in, df_pred_in):
     df_gt = get_df(df_gt_in, track_key="gt_track_id")
     df_pred = get_df(df_pred_in, track_key="pred_track_id")
 
+    # Get common columns between gt and pred dataframes
+    gt_cols = set(df_gt.columns)
+    pred_cols = set(df_pred.columns)
+    common_cols = list(gt_cols.intersection(pred_cols))
+
+    # Make sure we have at least one common column to merge on
+    if not common_cols:
+        raise ValueError(
+            "No common columns found between ground truth and predicted dataframes"
+        )
+
     df_merged = pd.merge(
         df_gt,
         df_pred,
-        left_on=[
-            "frame_id",
-            "Nose_x",
-            "Ear_R_x",
-            "Ear_L_x",
-            "TTI_x",
-            "TailTip_x",
-            "Head_x",
-            "Trunk_x",
-            "Tail_0_x",
-            "Tail_1_x",
-            "Tail_2_x",
-            "Shoulder_left_x",
-            "Shoulder_right_x",
-            "Haunch_left_x",
-            "Haunch_right_x",
-            "Neck_x",
-            "Nose_y",
-            "Ear_R_y",
-            "Ear_L_y",
-            "TTI_y",
-            "TailTip_y",
-            "Head_y",
-            "Trunk_y",
-            "Tail_0_y",
-            "Tail_1_y",
-            "Tail_2_y",
-            "Shoulder_left_y",
-            "Shoulder_right_y",
-            "Haunch_left_y",
-            "Haunch_right_y",
-            "Neck_y",
-        ],
-        right_on=[
-            "frame_id",
-            "Nose_x",
-            "Ear_R_x",
-            "Ear_L_x",
-            "TTI_x",
-            "TailTip_x",
-            "Head_x",
-            "Trunk_x",
-            "Tail_0_x",
-            "Tail_1_x",
-            "Tail_2_x",
-            "Shoulder_left_x",
-            "Shoulder_right_x",
-            "Haunch_left_x",
-            "Haunch_right_x",
-            "Neck_x",
-            "Nose_y",
-            "Ear_R_y",
-            "Ear_L_y",
-            "TTI_y",
-            "TailTip_y",
-            "Head_y",
-            "Trunk_y",
-            "Tail_0_y",
-            "Tail_1_y",
-            "Tail_2_y",
-            "Shoulder_left_y",
-            "Shoulder_right_y",
-            "Haunch_left_y",
-            "Haunch_right_y",
-            "Neck_y",
-        ],
+        left_on=common_cols,
+        right_on=common_cols,
         how="inner",
     )
 
     # Initialize MOT metrics accumulator and tracking variables
     acc = mm.MOTAccumulator(auto_id=True)
-    total_mislabeled_frames = 0
+    total_mislabeled_identities = 0
+    actual_mislabeled_identities = 0
+    total_correct_identities = 0
     mislabeled_frames = []
 
+    all_track_ids = set(df_merged["gt_track_id"].unique()) | set(
+        df_merged["pred_track_id"].unique()
+    )
+    track_id_map = {track_id: i for i, track_id in enumerate(all_track_ids)}
+
     # Process each frame in the merged dataframe
-    for frame, framedf in df_merged.groupby("frame_id"):
+    for frame, framedf in df_merged[df_merged["frame_id"] < 6600].groupby("frame_id"):
         # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
 
         # Check for any mismatches between ground truth and predictions
         for idx, gt_id in enumerate(gt_ids):
-            if gt_id != pred_tracks[idx]:
-                total_mislabeled_frames += 1
-                mislabeled_frames.append(frame)
-                break
+            correct_id = True
+            pred_id = pred_tracks[idx]
+            if track_dict is not None and pred_id in track_dict:
+                pred_tracks[idx] = track_dict[pred_id]
+                pred_id = pred_tracks[idx]
+            if gt_id != pred_id:
+                correct_id = False
 
+            if not correct_id:
+                if "_" in pred_tracks[idx]:
+                    # print(f"mislabeled frame {frame} with gt_id {gt_id} and pred_id {pred_tracks[idx]}")
+                    actual_mislabeled_identities += 1
+                total_mislabeled_identities += 1
+                mislabeled_frames.append(frame)
+            else:
+                total_correct_identities += 1
         # Create cost matrix for MOT metrics
         # NaN indicates no association, 1 indicates perfect match
-        cost_gt_pred = np.full((len(gt_ids), len(gt_ids)), np.nan)
+        gt_ids = np.array([track_id_map[id] for id in gt_ids])
+        pred_tracks = np.array([track_id_map[id] for id in pred_tracks])
+        cost_gt_pred = np.full((len(gt_ids), len(pred_tracks)), np.nan)
         np.fill_diagonal(cost_gt_pred, 1)
 
         # Update MOT accumulator with frame data
@@ -181,27 +148,6 @@ def get_metrics(df_gt_in, df_pred_in):
     # Compute MOT metrics
     mh = mm.metrics.create()
     summary = mh.compute(acc, name="acc").transpose()
-
-    # If more than half the frames are mislabeled, flip the track ID values
-    # This handles cases where track IDs are labeled oppositely
-    if total_mislabeled_frames > len(df_merged["frame_id"].unique()) / 2:
-        total_mislabeled_frames = (
-            len(df_merged["frame_id"].unique()) - total_mislabeled_frames
-        )
-        # Get all unique frame IDs
-        all_frames = set(df_merged["frame_id"].unique())
-
-        # Convert mislabeled_frames to a set for efficient difference operation
-        mislabeled_frames_set = set(mislabeled_frames)
-
-        # Find frames that are not in mislabeled_frames
-        correctly_labeled_frames = list(all_frames - mislabeled_frames_set)
-
-        # Sort the list to maintain order
-        correctly_labeled_frames.sort()
-
-        # Update mislabeled_frames to be the list of correctly labeled frames
-        mislabeled_frames = correctly_labeled_frames
 
     # Group consecutive mislabeled frames to analyze error patterns
     grouped_mislabeled_frames = []
@@ -221,4 +167,10 @@ def get_metrics(df_gt_in, df_pred_in):
         grouped_mislabeled_frames.append(current_group)
         group_lengths.append(len(current_group))
 
-    return summary, total_mislabeled_frames, group_lengths
+    return (
+        total_mislabeled_identities,
+        group_lengths,
+        total_correct_identities,
+        actual_mislabeled_identities,
+        summary,
+    )

@@ -324,30 +324,49 @@ class Tracker:
         n_frames = labels.video.shape[0]
         sorted_labels = []
         for frame_idx in range(n_frames):
-            sorted_labels.append(
-                labels.find(frame_idx=frame_idx, video=labels.video, return_new=True)[0]
+            found_label = labels.find(
+                frame_idx=frame_idx, video=labels.video, return_new=True
             )
+            inst_to_remove = []
+            inst_to_add = []
+            for inst in found_label[0]:
+                if not isinstance(inst, sio.PredictedInstance):
+                    new_inst = sio.PredictedInstance(
+                        skeleton=inst.skeleton,
+                        points={
+                            node: sio.PredictedPoint(
+                                x=point.x,
+                                y=point.y,
+                                visible=point.visible,
+                                complete=point.complete,
+                                score=1.0,
+                            )
+                            for node, point in inst.points.items()
+                        },
+                        track=inst.track,
+                        score=1.00,
+                        tracking_score=0,
+                    )
+                    inst_to_add.append(new_inst)
+                    inst_to_remove.append(inst)
+            for inst in inst_to_remove:
+                found_label[0].instances.remove(inst)
+            for inst in inst_to_add:
+                found_label[0].instances.append(inst)
 
+            sorted_labels.append(found_label[0])
         labels.labeled_frames = sorted_labels
 
         self.global_track_ids = [t.name for t in labels.tracks]
 
-        # Process frames sequentially for debugging
-        # for lf in tqdm(labels):
-        for lf in labels[:5000]:
-            if lf.frame_idx % 100 == 0:
-                print(
-                    f"Frame {lf.frame_idx}: Number of current tracks = {len(self.candidate.current_tracks)}"
-                )
+        for lf in tqdm(labels):
+            # for lf in labels:
             if lf.instances:
-                logger.info(f"Initializing tracker for frame {lf.frame_idx}")
                 tracked_instances = [
                     (inst.numpy(), inst.track.name)
                     for inst in lf.instances
                     if inst.track is not None
                 ]
-                if len(self.candidate.current_tracks) != len(set(self.candidate.current_tracks)):
-                    print(f"number of current tracks != number of unique tracks at frame {lf.frame_idx}")
 
                 self.track_frame(
                     lf.instances,
@@ -451,7 +470,9 @@ class Tracker:
                     instance.src_instance.track = self._track_objects[instance.track_id]
                     instance.src_instance.tracking_score = instance.tracking_score
                 else:
-                    self.candidate.add_new_tracks([instance], existing_track_ids=self._track_objects.keys())
+                    self.candidate.add_new_tracks(
+                        [instance], existing_track_ids=self._track_objects.keys()
+                    )
                     if instance.track_id not in self._track_objects:
                         self._track_objects[instance.track_id] = sio.Track(
                             str(instance.track_id)
