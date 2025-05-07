@@ -125,6 +125,7 @@ class Tracker:
         of_img_scale: float = 1.0,
         of_window_size: int = 21,
         of_max_levels: int = 3,
+        max_cost: int = None
     ):
         """Create `Tracker` from config.
 
@@ -745,7 +746,7 @@ class Tracker:
 
             for row, col in zip(row_ind, col_ind):
                 score = -costs_array[row, col]  # Convert cost back to score
-                if score > -1e10:  # Only assign track if score is below threshold
+                if score > -1e10 or score > self.max_cost:  # Only assign track if score is below threshold
                     tracking_scores.append(score)
                     matched_track_ids.append(track_ids[row])
                     matched_instance_indices.append(col)
