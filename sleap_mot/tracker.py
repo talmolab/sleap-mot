@@ -164,6 +164,8 @@ class Tracker:
             of_max_levels: Number of pyramid scale levels to consider. This is different
                 from the scale parameter, which determines the initial image scaling.
                 Default: 3. (only if `use_flow` is True)
+            max_cost: Maximum cost threshold for track assignment. If the matching score is
+                greater than this threshold, the track will not be assigned. Default: None.
 
         """
         if candidates_method == "fixed_window":
