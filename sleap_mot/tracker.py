@@ -399,8 +399,7 @@ class Tracker:
 
         self.global_track_ids = [t.name for t in labels.tracks]
 
-        for lf in tqdm(labels):
-            # for lf in labels:
+        for lf in labels:
             if lf.instances:
                 tracked_instances = [
                     (inst.numpy(), inst.track.name)
@@ -423,9 +422,7 @@ class Tracker:
                         lf.frame_idx,
                     )
 
-        print(f"Number of current tracks = {len(self.candidate.current_tracks)}")
         labels.update()
-        print(f"Number of current tracks = {len(self.candidate.current_tracks)}")
         labels.tracks = labels.tracks
 
         # Create new list of unique tracks first

@@ -108,7 +108,7 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
     track_id_map = {track_id: i for i, track_id in enumerate(all_track_ids)}
 
     # Process each frame in the merged dataframe
-    for frame, framedf in df_merged[df_merged["frame_id"] < 6600].groupby("frame_id"):
+    for frame, framedf in df_merged[df_merged["frame_id"]].groupby("frame_id"):
         # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
