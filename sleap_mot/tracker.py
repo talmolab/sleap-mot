@@ -60,6 +60,8 @@ class Tracker:
         use_flow: If True, `FlowShiftTracker` is used, where the poses are matched using
             optical flow shifts. Default: `False`.
         is_local_queue: `True` if `LocalQueueCandidates` is used else `False`.
+        max_cost: Maximum cost threshold for track assignment. If the matching score is
+            greater than this threshold, the track will not be assigned. Default: 0.5.
 
     """
 
@@ -72,6 +74,7 @@ class Tracker:
     track_matching_method: str = "hungarian"
     use_flow: bool = False
     is_local_queue: bool = False
+    max_cost: float = 0.5
     _scoring_functions: Dict[str, Any] = {
         "oks": compute_oks,
         "iou": compute_iou,
@@ -125,7 +128,7 @@ class Tracker:
         of_img_scale: float = 1.0,
         of_window_size: int = 21,
         of_max_levels: int = 3,
-        max_cost: int = None
+        max_cost: float = None
     ):
         """Create `Tracker` from config.
 
@@ -194,6 +197,7 @@ class Tracker:
                 of_window_size=of_window_size,
                 of_max_levels=of_max_levels,
                 is_local_queue=is_local_queue,
+                max_cost=max_cost,
             )
 
         tracker = cls(
@@ -204,6 +208,7 @@ class Tracker:
             track_matching_method=track_matching_method,
             use_flow=use_flow,
             is_local_queue=is_local_queue,
+            max_cost=max_cost,
         )
         return tracker
 
@@ -449,8 +454,6 @@ class Tracker:
                 }
 
         labels.update()
-        print(f"Number of current tracks = {len(self.candidate.current_tracks)}")
-
         return labels
 
     def track_frame(
@@ -746,7 +749,7 @@ class Tracker:
 
             for row, col in zip(row_ind, col_ind):
                 score = -costs_array[row, col]  # Convert cost back to score
-                if score > -1e10 or score > self.max_cost:  # Only assign track if score is below threshold
+                if score > -1e10 and score < self.max_cost if self.max_cost else True:  # Only assign track if score is below threshold
                     tracking_scores.append(score)
                     matched_track_ids.append(track_ids[row])
                     matched_instance_indices.append(col)
