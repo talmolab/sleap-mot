@@ -1,6 +1,6 @@
 """Module for tracking."""
 
-from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional
+from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional, Tuple
 from collections import defaultdict
 import attrs
 import cv2
@@ -314,7 +314,7 @@ class Tracker:
 
         Args:
             tracked_instances (List[Tuple[np.ndarray, str]]): List of tuples containing instance
-                coordinates and their global track IDs
+            coordinates and their global track IDs
             new_instances (List[Instance]): List of instances in current frame to update
             labels (Labels): Labels object containing all tracked instances
             frame_idx (int): Current frame index being processed
