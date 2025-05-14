@@ -156,15 +156,27 @@ class LocalQueueCandidates:
             add_to_queue: Boolean to add the `current_instances` to the tracker queue.
             existing_track_ids: List of existing track IDs.
         """
+        # First assign matched tracks
         if row_inds is not None and col_inds is not None:
             for idx, (row, col) in enumerate(zip(row_inds, col_inds)):
                 current_instances[row].track_id = col
                 current_instances[row].tracking_score = tracking_scores[idx]
 
+        # Create new tracks for unmatched instances
+        unmatched_indices = [i for i in range(len(current_instances)) if i not in (row_inds if row_inds is not None else [])]
+        for idx in unmatched_indices:
+            if current_instances[idx].instance_score > self.instance_score_threshold:
+                new_track_id = self.get_new_track_id(existing_track_ids)
+                existing_track_ids.append(new_track_id)
+                current_instances[idx].track_id = new_track_id
+                current_instances[idx].tracking_score = 1.0
+                self.current_tracks.append(new_track_id)
+
         if add_to_queue:
             # Track which track_ids get updated
             updated_track_ids = set()
 
+            # Add all instances with track IDs to their respective queues
             for track_instance in current_instances:
                 if track_instance.track_id is not None:
                     self.tracker_queue[track_instance.track_id].append(track_instance)
@@ -184,17 +196,6 @@ class LocalQueueCandidates:
                         image=None,
                     )
                     self.tracker_queue[track_id].append(empty_instance)
-
-            # Create new tracks for instances with unassigned tracks from track matching
-            new_current_instances_inds = [
-                x for x in range(len(current_instances)) if x not in row_inds
-            ]
-            if new_current_instances_inds:
-                for ind in new_current_instances_inds:
-                    self.add_new_tracks(
-                        [current_instances[ind]],
-                        existing_track_ids=existing_track_ids,
-                    )
 
         return current_instances
 
