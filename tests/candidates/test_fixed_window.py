@@ -20,14 +20,16 @@ def test_fixed_window_candidates(centered_pair_predictions):
     track_instances = fixed_window_candidates.add_new_tracks(track_instances)
     assert len(fixed_window_candidates.tracker_queue) == 1
 
-    new_track_id = fixed_window_candidates.get_new_track_id()
-    assert new_track_id == 2
+    new_track_id = fixed_window_candidates.get_new_track_id(
+        existing_track_ids=fixed_window_candidates.current_tracks
+    )
+    assert new_track_id == "2"
 
     track_instances = tracker.get_features(pred_instances, 0)
     tracked_instances = fixed_window_candidates.add_new_tracks(track_instances)
-    assert tracked_instances.track_ids == [2, 3]
+    assert tracked_instances.track_ids == ["2", "3"]
     assert tracked_instances.tracking_scores == [1.0, 1.0]
 
-    features_track_id = fixed_window_candidates.get_features_from_track_id(0)
+    features_track_id = fixed_window_candidates.get_features_from_track_id("0")
     assert isinstance(features_track_id, list)
     assert len(features_track_id) == 1

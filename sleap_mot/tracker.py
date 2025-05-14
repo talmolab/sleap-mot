@@ -577,9 +577,7 @@ class Tracker:
         """Get the tracked instances from tracker queue."""
         return self.update_candidates(self.candidate.tracker_queue)
 
-    def update_candidates(
-        self, candidates_list: Union[Deque, DefaultDict[int, Deque]]
-    ) -> Dict[int, TrackedInstanceFeature]:
+    def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
         """Return dictionary with the features of tracked instances.
 
         Args:
@@ -589,16 +587,34 @@ class Tracker:
         Returns:
             Dictionary with keys as track IDs and values as the list of `TrackedInstanceFeature`.
         """
-        candidates_feature_dict = defaultdict(list)
-        for track_id in self.candidate.current_tracks:
-            candidates_feature_dict[track_id].extend(
-                self.candidate.get_features_from_track_id(track_id, candidates_list)
-            )
-            if all(x.feature is None for x in candidates_feature_dict[track_id]):
-                self.candidate.current_tracks.remove(track_id)
-                del self.candidate.tracker_queue[track_id]
-                del candidates_feature_dict[track_id]
-
+        if self.is_local_queue:
+            candidates_feature_dict = defaultdict(list)
+            for track_id in self.candidate.current_tracks:
+                candidates_feature_dict[track_id].extend(
+                    self.candidate.get_features_from_track_id(track_id, candidates_list)
+                )
+                if all(x.feature is None for x in candidates_feature_dict[track_id]):
+                    self.candidate.current_tracks.remove(track_id)
+                    del self.candidate.tracker_queue[track_id]
+                    del candidates_feature_dict[track_id]
+        else:
+            candidates_feature_dict = deque()
+            # For fixed window, candidates_list is a deque of TrackInstances
+            for track_id in self.candidate.current_tracks:
+                for track_instance in candidates_list:
+                    if track_id in track_instance.track_ids:
+                        track_idx = track_instance.track_ids.index(track_id)
+                        tracked_instance_feature = TrackedInstanceFeature(
+                            feature=track_instance.features[track_idx],
+                            src_predicted_instance=track_instance.src_instances[
+                                track_idx
+                            ],
+                            frame_idx=track_instance.frame_idx,
+                            tracking_score=track_instance.tracking_scores[track_idx],
+                            instance_score=track_instance.instance_scores[track_idx],
+                            shifted_keypoints=None,
+                        )
+                        candidates_feature_dict.append(tracked_instance_feature)
         return candidates_feature_dict
 
     def get_scores(
@@ -688,10 +704,15 @@ class Tracker:
                         score = scoring_method(f, candidate_feature)
                         oks.append(score)
                     else:
-                        oks.append(-1e10)
+                        if self.scoring_reduction == "weighted":
+                            oks.append(-1e10)
+                        else:
+                            oks.append(np.nan)
 
                 # Apply scoring reduction
                 if oks:
+                    if np.all(isinstance(x, np.ndarray) for x in oks):
+                        oks = [x[0][0] if isinstance(x, np.ndarray) else x for x in oks]
                     oks = scoring_reduction(oks)  # scoring reduction
                     scores[track_id][f_idx] = oks
                 else:

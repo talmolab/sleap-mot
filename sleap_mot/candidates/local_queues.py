@@ -102,7 +102,9 @@ class LocalQueueCandidates:
                 new_track_id = str(
                     min(set(range(max(numeric_track_ids) + 2)) - set(numeric_track_ids))
                 )
-            if self.max_tracks is not None and new_track_id > self.max_tracks:  # TODO
+            if (
+                self.max_tracks is not None and int(new_track_id) > self.max_tracks
+            ):  # TODO
                 raise Exception("Exceeding max tracks")
         self.tracker_queue[new_track_id] = deque(maxlen=self.window_size)
         return new_track_id
