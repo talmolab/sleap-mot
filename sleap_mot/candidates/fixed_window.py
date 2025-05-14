@@ -76,9 +76,16 @@ class FixedWindowCandidates:
         return output
 
     def get_new_track_id(self, existing_track_ids: List[str] = []) -> int:
+        """Get a new track ID for a new track.
+
+        Args:
+            existing_track_ids: List of existing track IDs.
+
+        Returns:
+            New track ID.
+        """
         if not existing_track_ids:
             new_track_id = "0"
-
         else:
             numeric_track_ids = [
                 int(track_id) for track_id in existing_track_ids if track_id.isdigit()
