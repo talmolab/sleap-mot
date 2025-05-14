@@ -451,9 +451,9 @@ class Tracker:
                         t for t in labels.tracks if t.name == inst.track.name
                     )
                 inst.skeleton = labels.skeleton
-                inst.points = {
-                    i: point for i, (node, point) in enumerate(inst.points.items())
-                }
+                # inst.points = {
+                #     i: point for i, (node, point) in enumerate(inst.points.items())
+                # }
 
         labels.update()
         return labels
