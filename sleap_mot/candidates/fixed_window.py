@@ -75,12 +75,27 @@ class FixedWindowCandidates:
                 output.append(tracked_instance_feature)
         return output
 
-    def get_new_track_id(self) -> int:
-        """Return a new track_id."""
-        if not self.current_tracks:
-            new_track_id = 0
+    def get_new_track_id(self, existing_track_ids: List[str] = []) -> int:
+        """Get a new track ID for a new track.
+
+        Args:
+            existing_track_ids: List of existing track IDs.
+
+        Returns:
+            New track ID.
+        """
+        if not existing_track_ids:
+            new_track_id = "0"
         else:
-            new_track_id = max(self.current_tracks) + 1
+            numeric_track_ids = [
+                int(track_id) for track_id in existing_track_ids if track_id.isdigit()
+            ]
+            if not numeric_track_ids:
+                new_track_id = "0"
+            else:
+                new_track_id = str(
+                    min(set(range(max(numeric_track_ids) + 2)) - set(numeric_track_ids))
+                )
         return new_track_id
 
     def add_new_tracks(
@@ -88,6 +103,7 @@ class FixedWindowCandidates:
         current_instances: TrackInstances,
         add_to_queue: bool = True,
         maintain_track_ids: bool = False,
+        existing_track_ids: List[str] = [],
     ) -> TrackInstances:
         """Add new track IDs to the `TrackInstances` object and to the tracker queue."""
         is_new_track = False
@@ -107,7 +123,8 @@ class FixedWindowCandidates:
                     ]
                     new_tracks_id = int("".join(map(str, track_numbers)))
                 else:
-                    new_tracks_id = self.get_new_track_id()
+                    new_tracks_id = self.get_new_track_id(existing_track_ids)
+                    existing_track_ids.append(new_tracks_id)
                 current_instances.track_ids[i] = new_tracks_id
                 current_instances.tracking_scores[i] = 1.0
                 self.current_tracks.append(new_tracks_id)
