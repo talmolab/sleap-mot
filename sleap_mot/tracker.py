@@ -6,6 +6,10 @@ import attrs
 import cv2
 import numpy as np
 from collections import deque
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+import logging
+from sklearn.preprocessing import StandardScaler
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -26,14 +30,11 @@ from sleap_mot.utils import (
     compute_cosine_sim,
     compute_oks,
 )
-import logging
 
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 
 
 @attrs.define
@@ -351,7 +352,13 @@ class Tracker:
 
         return new_instances
 
-    def track(self, labels: sio.Labels, max_dist: int = None, inplace: bool = False):
+    def track(
+        self,
+        labels: sio.Labels,
+        max_dist: int = None,
+        inplace: bool = False,
+        model_config: Dict[str, Any] = None,
+    ):
         """Track instances across frames.
 
         This method tracks instances across frames in the provided `sio.Labels` object.
@@ -429,6 +436,14 @@ class Tracker:
                         labels,
                         lf.frame_idx,
                     )
+
+        if model_config:
+            global_identity_model, identity_model_scaler = self.train_identity_model(
+                labels, model_config
+            )
+            self.infer_and_assign_untracked_identities(
+                labels, global_identity_model, identity_model_scaler
+            )
 
         labels.update()
         labels.tracks = labels.tracks
@@ -790,6 +805,363 @@ class Tracker:
         )
 
         return current_tracked_instances
+
+    def train_identity_model(self, labels: sio.Labels, model_config: Dict[str, Any]):
+        """Train an identity assignment model using tracked instances.
+
+        Args:
+            labels: Labels object containing all instances.
+            model_config: Dictionary specifying the model type and its parameters.
+                          Example: {"type": "hmm", "params": {"n_components": 5, ...}}
+        """
+
+        # Group instances by global track ID
+        tracked_sequences = defaultdict(list)
+
+        # Extract features for each tracked instance
+        for lf in labels:
+            for inst in lf.instances:
+                if inst.track is not None and inst.track.name in self.global_track_ids:
+                    # Assuming self.extract_pose_features is available and appropriate
+                    features = self.extract_pose_features(inst)
+                    tracked_sequences[inst.track.name].append(features)
+
+        # Convert sequences to numpy arrays
+        sequences = []
+        lengths = []
+        for track_id, seq in tracked_sequences.items():
+            if len(seq) > 0:
+                sequences.append(np.array(seq))
+                lengths.append(len(seq))
+
+        if not sequences:
+            logger.info("No tracked sequences found for model training.")
+            global_identity_model = None
+            identity_model_scaler = None
+            return
+
+        # Concatenate all sequences
+        X = np.vstack(sequences)
+
+        # Initialize and fit scaler
+        feature_scaler = StandardScaler()
+        X_scaled = feature_scaler.fit_transform(X)
+        identity_model_scaler = feature_scaler  # Store the scaler for inference
+
+        # Check for NaN values in scaled features
+        if np.isnan(X_scaled).any():
+            logger.warning(
+                "Scaled features contain NaN values. Attempting to remove them."
+            )
+            logger.warning(f"Number of NaN values: {np.isnan(X_scaled).sum()}")
+
+            valid_mask = ~np.isnan(X_scaled).any(axis=1)
+            X_scaled = X_scaled[valid_mask]
+
+            # Update lengths to match filtered data
+            new_lengths = []
+            current_pos = 0
+            for length in lengths:
+                original_segment = valid_mask[current_pos : current_pos + length]
+                new_segment_length = original_segment.sum()
+                if new_segment_length > 0:
+                    new_lengths.append(new_segment_length)
+                current_pos += length
+            lengths = new_lengths
+
+            if not X_scaled.size or not lengths:
+                logger.warning(
+                    "No valid sequences remaining after NaN removal for model training."
+                )
+                global_identity_model = None
+                # Keep the scaler as it was fit on original data before NaN check on X_scaled
+                return
+
+        # Model Initialization and Training
+        model_type = model_config.get("type")
+        if not model_type:
+            raise ValueError("Model type must be specified in model_config.")
+
+        model_params = model_config.get("params", {})
+        current_model = None
+
+        if model_type.lower() == "hmm":
+            try:
+                from hmmlearn import hmm
+            except ImportError:
+                logger.error(
+                    "hmmlearn package is required for HMM model. Please install it."
+                )
+                raise
+
+            n_components = model_params.get("n_components", 5)
+            covariance_type = model_params.get("covariance_type", "full")
+            random_state = model_params.get("random_state", 42)
+            # Add any other HMM parameters from model_params, e.g., n_iter, tol
+            hmm_params = {
+                "n_components": n_components,
+                "covariance_type": covariance_type,
+                "random_state": random_state,
+                **{
+                    k: v
+                    for k, v in model_params.items()
+                    if k not in ["n_components", "covariance_type", "random_state"]
+                },
+            }
+            current_model = hmm.GaussianHMM(**hmm_params)
+            logger.info(f"Initializing HMM with parameters: {hmm_params}")
+        # Example for another model type:
+        # elif model_type.lower() == "transformer":
+        #     # from .models import TransformerIdentityModel # Example import
+        #     # current_model = TransformerIdentityModel(**model_params)
+        #     logger.info(f"Initializing Transformer model with parameters: {model_params}")
+        #     raise NotImplementedError("Transformer model training not yet implemented.")
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+
+        try:
+            logger.info(f"Fitting {model_type} model...")
+            if model_type.lower() == "hmm":  # HMM's fit method uses lengths
+                current_model.fit(X_scaled, lengths=lengths)
+            else:
+                # Assume other models might have a simpler fit or need X_scaled and labels/targets
+                # This part needs to be adapted based on the common interface for your models
+                current_model.fit(
+                    X_scaled
+                )  # Or current_model.fit(sequences_scaled, sequence_labels)
+
+            global_identity_model = current_model
+            logger.info(f"Successfully trained {model_type} model.")
+            if model_type.lower() == "hmm":
+                logger.info(
+                    f"  HMM - n_components: {current_model.n_components}, converged: {current_model.monitor_.converged}"
+                )
+
+        except Exception as e:
+            logger.error(f"Error training {model_type} model: {e}")
+            global_identity_model = None  # Ensure model is not set if training failed
+            identity_model_scaler = None  # Also clear scaler if training failed
+            # Optionally re-raise the exception if the caller should handle it
+            # raise
+
+        return global_identity_model, identity_model_scaler
+
+    def infer_and_assign_untracked_identities(
+        self, labels: sio.Labels, global_identity_model, identity_model_scaler
+    ):
+        """Infer and assign identities to untracked instances using the trained model.
+
+        Args:
+            labels: Labels object containing all instances.
+        """
+
+        if not global_identity_model or not identity_model_scaler:
+            logger.warning(
+                "Identity model or feature scaler is not available. "
+                "Run train_identity_model first."
+            )
+            return
+
+        if not self.global_track_ids:
+            logger.warning("No global track IDs defined to assign. Skipping inference.")
+            return
+
+        tracklets = self.group_tracklets(labels)
+
+        # Process each untracked tracklet
+        for track_id, instances_in_tracklet_with_frame_idx in tracklets.items():
+            is_local_tracklet = True
+            if track_id in self.global_track_ids:
+                is_local_tracklet = False  # This tracklet already has a global ID name
+
+            if (
+                is_local_tracklet
+            ):  # Only process tracklets that don't already have a global ID
+                if not instances_in_tracklet_with_frame_idx:
+                    logger.debug(f"Tracklet {track_id} is empty, skipping.")
+                    continue
+
+                # Sort instances by frame index
+                instances_in_tracklet_with_frame_idx.sort(key=lambda x: x[0])
+
+                frames = [item[0] for item in instances_in_tracklet_with_frame_idx]
+                actual_instances = [
+                    item[1] for item in instances_in_tracklet_with_frame_idx
+                ]
+
+                if not actual_instances:
+                    logger.debug(
+                        f"Tracklet {track_id} has no actual instances after unpacking, skipping."
+                    )
+                    continue
+
+                # Extract features
+                # Assuming extract_pose_features is a static method or defined in the class
+                features = np.array(
+                    [self.extract_pose_features(inst) for inst in actual_instances]
+                )
+
+                if features.size == 0:
+                    logger.debug(
+                        f"No features extracted for tracklet {track_id}, skipping."
+                    )
+                    continue
+
+                # Scale features
+                features_scaled = identity_model_scaler.transform(features)
+
+                # Check for NaN values in scaled features
+                if np.isnan(features_scaled).any():
+                    logger.warning(
+                        f"Scaled features for track {track_id} contain NaN values. Imputing with mean."
+                    )
+                    # Impute NaNs with the mean of the respective column
+                    for col in range(features_scaled.shape[1]):
+                        col_mask = np.isnan(features_scaled[:, col])
+                        if col_mask.any():
+                            col_mean = np.nanmean(features_scaled[:, col])
+                            if np.isnan(col_mean):
+                                # If entire column was NaN, use 0 or another placeholder
+                                col_mean = 0
+                            features_scaled[col_mask, col] = col_mean
+                    if np.isnan(features_scaled).any():
+                        logger.error(
+                            f"Features for tracklet {track_id} still contain NaNs after imputation. Skipping."
+                        )
+                        continue  # Skip this tracklet if NaNs persist
+
+                if features_scaled.shape[0] == 0:
+                    logger.debug(
+                        f"Tracklet {track_id} has no features after scaling/NaN handling, skipping."
+                    )
+                    continue
+
+                # Predict global identity for the tracklet
+                # The model's predict_identity method should handle its internal logic
+                # and return a proposed global ID name from the available self.global_track_ids.
+                try:
+                    # We pass self.global_track_ids so the model knows the candidate pool.
+                    # The model's predict_identity should return the *name* of the chosen global ID.
+                    predicted_global_id_name = global_identity_model.predict(
+                        features_scaled
+                    )
+                except AttributeError as e:
+                    logger.error(
+                        f"The trained model does not have a 'predict_identity' method or it failed: {e}"
+                    )
+                    continue  # Skip to next tracklet
+                except Exception as e:
+                    logger.error(
+                        f"Error during model prediction for tracklet {track_id}: {e}"
+                    )
+                    continue
+
+                if (
+                    not predicted_global_id_name
+                    or predicted_global_id_name not in self._track_objects
+                ):
+                    logger.warning(
+                        f"Model predicted an invalid or unknown global ID '{predicted_global_id_name}' for tracklet {track_id}. Skipping."
+                    )
+                    continue
+
+                assigned_global_track_object = self._track_objects[
+                    predicted_global_id_name
+                ]
+
+                # Check if the proposed global track is already used in any frame of this tracklet by another instance
+                is_track_available = True
+                for frame_idx, inst_to_assign in zip(frames, actual_instances):
+                    # labels[frame_idx] should give a LabeledFrame object
+                    lf = labels.find(frame_idx=frame_idx, video=labels.video)[0]
+                    if lf:
+                        for existing_inst in lf.instances:
+                            if (
+                                existing_inst != inst_to_assign
+                                and existing_inst.track == assigned_global_track_object
+                            ):
+                                is_track_available = False
+                                break
+                if not is_track_available:
+                    break
+
+                if not is_track_available:
+                    # Simple strategy: if predicted ID is taken, try to find an alternative
+                    # This could be made more sophisticated (e.g. using model scores for alternatives)
+                    logger.warning(
+                        f"Predicted global ID {predicted_global_id_name} for tracklet {track_id} is unavailable in some frames."
+                    )
+                    # For now, we just skip assignment if the preferred one is taken.
+                    # A more advanced strategy could be implemented here, e.g., trying next best prediction from model.
+                    # Or, iterate through self.global_track_ids to find one that *is* available.
+                    # This part of the logic from the notebook is complex and highly dependent on the model's output.
+                    # Simplified: if primary is unavailable, we skip for now.
+                    logger.info(
+                        f"Skipping assignment for tracklet {track_id} as preferred ID {predicted_global_id_name} is unavailable."
+                    )
+                    continue  # Or implement alternative assignment logic here
+
+                # Update track references for all instances in this tracklet
+                for inst_to_assign in actual_instances:
+                    inst_to_assign.track = assigned_global_track_object
+
+                logger.info(
+                    f"Assigned tracklet {track_id} to global identity {assigned_global_track_object.name}"
+                )
+
+    def extract_pose_features(self, instance: sio.PredictedInstance) -> np.ndarray:
+        """Extract pose features from an instance for HMM input.
+
+        Args:
+            instance: The instance to extract features from.
+
+        Returns:
+            np.ndarray: Flattened feature vector containing:
+                - Centroid coordinates (x, y)
+                - Keypoint coordinates (x, y for each keypoint)
+                - Bounding box coordinates (x1, y1, x2, y2)
+        """
+        # Get centroid
+        centroid = get_centroid(instance)
+
+        # Get keypoints
+        keypoints = get_keypoints(instance)
+        # Replace NaN values with mean of non-NaN values
+        keypoints = np.where(np.isnan(keypoints), np.nanmean(keypoints), keypoints)
+
+        # Get bounding box
+        bbox = get_bbox(instance)
+
+        # Concatenate all features
+        features = np.concatenate(
+            [
+                centroid,  # [x, y]
+                keypoints.flatten(),  # [x1, y1, x2, y2, ...]
+                bbox,  # [x1, y1, x2, y2]
+            ]
+        )
+
+        return features
+
+    def group_tracklets(
+        self, labels: sio.Labels
+    ) -> Dict[str, List[sio.PredictedInstance]]:
+        """Group instances into tracklets based on their track IDs.
+
+        Args:
+            labels: Labels object containing all instances.
+
+        Returns:
+            Dict mapping track IDs to lists of instances in that tracklet.
+        """
+        tracklets = defaultdict(list)
+
+        for frame_idx, lf in enumerate(labels):
+            for inst in lf.instances:
+                if inst.track is not None:
+                    tracklets[inst.track.name].append((frame_idx, inst))
+
+        return tracklets
 
 
 @attrs.define
