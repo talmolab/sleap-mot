@@ -163,7 +163,11 @@ class LocalQueueCandidates:
                 current_instances[row].tracking_score = tracking_scores[idx]
 
         # Create new tracks for unmatched instances
-        unmatched_indices = [i for i in range(len(current_instances)) if i not in (row_inds if row_inds is not None else [])]
+        unmatched_indices = [
+            i
+            for i in range(len(current_instances))
+            if i not in (row_inds if row_inds is not None else [])
+        ]
         for idx in unmatched_indices:
             if current_instances[idx].instance_score > self.instance_score_threshold:
                 new_track_id = self.get_new_track_id(existing_track_ids)
