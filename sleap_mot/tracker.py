@@ -1,6 +1,6 @@
 """Module for tracking."""
 
-from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional, Tuple
+from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional, Tuple, Tuple
 from collections import defaultdict
 import attrs
 import cv2
@@ -30,11 +30,14 @@ from sleap_mot.utils import (
     compute_cosine_sim,
     compute_oks,
 )
+import logging
 
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
 
 @attrs.define
@@ -76,11 +79,32 @@ class Tracker:
     use_flow: bool = False
     is_local_queue: bool = False
     max_cost: float = 0.5
+    max_cost: float = 0.5
     _scoring_functions: Dict[str, Any] = {
         "oks": compute_oks,
         "iou": compute_iou,
         "cosine_sim": compute_cosine_sim,
         "euclidean_dist": compute_euclidean_distance,
+    }
+    _scoring_reduction_methods: Dict[str, Any] = {
+        "mean": np.nanmean,
+        "max": np.nanmax,
+        "weighted": lambda x: (
+            np.average(
+                np.array(x),
+                weights=np.maximum(
+                    1e-10,
+                    1
+                    - (
+                        np.abs(np.arange(len(np.array(x))) - (len(np.array(x)) - 1))
+                        / len(np.array(x))
+                    ),
+                ),
+                axis=0,
+            )
+            if len(np.array(x).shape) > 0
+            else x  # Return the scalar value directly if x is a scalar
+        ),
     }
     _scoring_reduction_methods: Dict[str, Any] = {
         "mean": np.nanmean,
@@ -113,6 +137,8 @@ class Tracker:
     }
     _track_objects: Dict[str, sio.Track] = attrs.field(factory=dict)
     global_track_ids: List[str] = attrs.field(factory=list)
+    _track_objects: Dict[str, sio.Track] = attrs.field(factory=dict)
+    global_track_ids: List[str] = attrs.field(factory=list)
 
     @classmethod
     def from_config(
@@ -129,6 +155,7 @@ class Tracker:
         of_img_scale: float = 1.0,
         of_window_size: int = 21,
         of_max_levels: int = 3,
+        max_cost: float = None,
         max_cost: float = None,
     ):
         """Create `Tracker` from config.
@@ -167,6 +194,8 @@ class Tracker:
                 Default: 3. (only if `use_flow` is True)
             max_cost: Maximum cost threshold for track assignment. If the matching score is
                 greater than this threshold, the track will not be assigned. Default: None.
+            max_cost: Maximum cost threshold for track assignment. If the matching score is
+                greater than this threshold, the track will not be assigned. Default: None.
 
         """
         if candidates_method == "fixed_window":
@@ -201,6 +230,7 @@ class Tracker:
                 of_max_levels=of_max_levels,
                 is_local_queue=is_local_queue,
                 max_cost=max_cost,
+                max_cost=max_cost,
             )
 
         tracker = cls(
@@ -212,9 +242,69 @@ class Tracker:
             use_flow=use_flow,
             is_local_queue=is_local_queue,
             max_cost=max_cost,
+            max_cost=max_cost,
         )
         return tracker
 
+    def update_track_id_and_queue(
+        self, tracklet_id, global_track_id, frame_idx, labels
+    ):
+        """Update track ID and queue for a tracklet.
+
+        Updates the track ID of a tracklet and its corresponding queue entries to use a new global track ID.
+        If the tracklet ID is not already in global_track_ids, updates the candidate's current tracks and
+        tracker queue to use the new global ID. Otherwise, updates the tracker queue with instances from
+        the recent frames.
+
+        Args:
+            tracklet_id (Track): The current track ID of the tracklet
+            global_track_id (Track): The new global track ID to assign
+            frame_idx (int): Current frame index
+            labels (Labels): Labels object containing tracked instances
+        """
+        if tracklet_id.name not in self.global_track_ids:
+            if tracklet_id.name in self.candidate.current_tracks:
+                self.candidate.current_tracks.remove(tracklet_id.name)
+            if global_track_id.name not in self.candidate.current_tracks:
+                self.candidate.current_tracks.append(global_track_id.name)
+            # self._track_objects.pop(tracklet_id.name)
+            self._track_objects[global_track_id.name] = global_track_id
+
+            self.candidate.tracker_queue[global_track_id.name] = (
+                self.candidate.tracker_queue.pop(tracklet_id.name, [])
+            )
+            for val in self.candidate.tracker_queue[global_track_id.name]:
+                val.track_id = global_track_id.name
+
+        else:
+            for lf in labels[frame_idx - self.candidate.window_size : frame_idx + 1]:
+                updated_track_ids = set()
+                for inst in lf.instances:
+                    self.candidate.tracker_queue[inst.track.name].append(
+                        self.get_features([inst], lf.frame_idx, lf.image)[0]
+                    )
+                    updated_track_ids.add(inst.track.name)
+
+                for track_id in self.candidate.current_tracks:
+                    if track_id not in updated_track_ids:
+                        empty_instance = TrackInstanceLocalQueue(
+                            src_instance=None,
+                            src_instance_idx=None,
+                            feature=None,
+                            instance_score=0.0,
+                            track_id=track_id,
+                            tracking_score=0.0,
+                            frame_idx=lf.frame_idx,
+                            image=lf.image,
+                        )
+                        self.candidate.tracker_queue[track_id].append(empty_instance)
+
+    def get_tracklet(self, matching_instance, global_track_id, labels, frame_idx):
+        """Get the tracklet (sequence of instances) associated with a given instance.
+
+        Given an instance and global track ID, finds all consecutive instances in previous frames
+        that have the same track ID, up to 300 frames back. Stops if it encounters the global track ID
+        or if the matching instance's tracklet ID is already in global_track_ids.
     def update_track_id_and_queue(
         self, tracklet_id, global_track_id, frame_idx, labels
     ):
@@ -280,8 +370,81 @@ class Tracker:
             global_track_id (Track): The global track ID being matched against
             labels (Labels): Labels object containing tracked instances
             frame_idx (int): Current frame index
+            matching_instance (Instance): The instance to find the tracklet for
+            global_track_id (Track): The global track ID being matched against
+            labels (Labels): Labels object containing tracked instances
+            frame_idx (int): Current frame index
 
         Returns:
+            list[Instance] or None: List of instances in the tracklet if found, None if no matching instance
+        """
+        if matching_instance:
+            tracklet_id = matching_instance.track
+            before_frames = [
+                labels.find(frame_idx=frame, video=labels.video, return_new=True)[0]
+                for frame in range(frame_idx - 1, max(frame_idx - 300, -1), -1)
+            ]
+
+            tracklet = [matching_instance]
+
+            for lf in before_frames:
+                if any(
+                    inst.track.name == global_track_id.name for inst in lf.instances
+                ):
+                    break
+                for inst in lf.instances:
+                    if inst.track.name == tracklet_id.name:
+                        if inst.track.name in self.global_track_ids:
+                            return tracklet
+                        tracklet.append(inst)
+            return tracklet
+        return None
+
+    def id_tracklet(self, tracked_instances, new_instances, labels, frame_idx):
+        """Update track IDs for a set of tracked instances.
+
+        Given a list of tracked instances with their global track IDs, updates the track IDs
+        of matching instances in the current frame. For each tracked instance, finds any matching
+        tracklets and updates their track IDs to use the global track ID.
+
+        Args:
+            tracked_instances (List[Tuple[np.ndarray, str]]): List of tuples containing instance
+            coordinates and their global track IDs
+            new_instances (List[Instance]): List of instances in current frame to update
+            labels (Labels): Labels object containing all tracked instances
+            frame_idx (int): Current frame index being processed
+
+        Returns:
+            List[Instance]: Updated list of instances with track IDs assigned
+        """
+        for inst_numpy, global_track_name in tracked_instances:
+            global_track_id = self._track_objects.get(global_track_name)
+
+            if not global_track_id:
+                global_track_id = sio.Track(name=global_track_name)
+                self._track_objects[global_track_name] = global_track_id
+
+            if any(global_track_name == inst.track.name for inst in new_instances):
+                continue
+            matching_instance = next(
+                i
+                for i in new_instances
+                if np.allclose(i.numpy(), inst_numpy, equal_nan=True)
+            )
+            tracklet_id = matching_instance.track
+            tracklet = self.get_tracklet(
+                matching_instance, global_track_id, labels, frame_idx
+            )
+
+            if tracklet:
+                for inst in tracklet:
+                    inst.track = global_track_id
+
+            self.update_track_id_and_queue(
+                tracklet_id, global_track_id, frame_idx, labels
+            )
+
+        return new_instances
             list[Instance] or None: List of instances in the tracklet if found, None if no matching instance
         """
         if matching_instance:
@@ -410,7 +573,40 @@ class Tracker:
                 found_label[0].instances.append(inst)
 
             sorted_labels.append(found_label[0])
+            found_label = labels.find(
+                frame_idx=frame_idx, video=labels.video, return_new=True
+            )
+            inst_to_remove = []
+            inst_to_add = []
+            for inst in found_label[0]:
+                if not isinstance(inst, sio.PredictedInstance):
+                    new_inst = sio.PredictedInstance(
+                        skeleton=inst.skeleton,
+                        points={
+                            node: sio.PredictedPoint(
+                                x=point.x,
+                                y=point.y,
+                                visible=point.visible,
+                                complete=point.complete,
+                                score=1.0,
+                            )
+                            for node, point in inst.points.items()
+                        },
+                        track=inst.track,
+                        score=1.00,
+                        tracking_score=0,
+                    )
+                    inst_to_add.append(new_inst)
+                    inst_to_remove.append(inst)
+            for inst in inst_to_remove:
+                found_label[0].instances.remove(inst)
+            for inst in inst_to_add:
+                found_label[0].instances.append(inst)
+
+            sorted_labels.append(found_label[0])
         labels.labeled_frames = sorted_labels
+
+        self.global_track_ids = [t.name for t in labels.tracks]
 
         self.global_track_ids = [t.name for t in labels.tracks]
 
@@ -460,11 +656,30 @@ class Tracker:
         labels.tracks = unique_tracks
 
         for lf in labels:
+        labels.tracks = labels.tracks
+
+        # Create new list of unique tracks first
+        unique_tracks = []
+        seen_names = set()
+        for track in labels.tracks:
+            if track.name not in seen_names:
+                unique_tracks.append(track)
+                seen_names.add(track.name)
+
+        # Assign unique tracks back to labels.tracks
+        labels.tracks = unique_tracks
+
+        for lf in labels:
             for inst in lf.instances:
                 if inst.track is not None:
                     inst.track = next(
                         t for t in labels.tracks if t.name == inst.track.name
+                        t for t in labels.tracks if t.name == inst.track.name
                     )
+                inst.skeleton = labels.skeleton
+                # inst.points = {
+                #     i: point for i, (node, point) in enumerate(inst.points.items())
+                # }
                 inst.skeleton = labels.skeleton
                 # inst.points = {
                 #     i: point for i, (node, point) in enumerate(inst.points.items())
@@ -472,12 +687,16 @@ class Tracker:
 
         labels.update()
         return labels
+        labels.update()
+        return labels
 
     def track_frame(
         self,
         instances: List[sio.PredictedInstance],
+        instances: List[sio.PredictedInstance],
         frame_idx: int,
         image: np.ndarray = None,
+        max_dist: int = None,
         max_dist: int = None,
         add_to_queue: bool = False,
     ) -> List[sio.PredictedInstance]:
@@ -489,18 +708,26 @@ class Tracker:
 
         Args:
             instances (List[sio.PredictedInstance]): The list of instances to assign track IDs to.
+            instances (List[sio.PredictedInstance]): The list of instances to assign track IDs to.
             frame_idx (int): The index of the current frame.
             image (np.ndarray): The image of the current frame.
             add_to_queue (bool): If True, the instances will be added to the tracker queue.
+            max_dist (int): The maximum pixel distance between instances to consider a match.
             max_dist (int): The maximum pixel distance between instances to consider a match.
 
         Returns:
             List[sio.PredictedInstance]: The list of instances with assigned track IDs.
         """
         current_instances = self.get_features(instances, frame_idx, image)
+        current_instances = self.get_features(instances, frame_idx, image)
 
         candidates_feature_dict = self.generate_candidates()
+        candidates_feature_dict = self.generate_candidates()
 
+        if candidates_feature_dict:
+            scores = self.get_scores(
+                current_instances, candidates_feature_dict, max_dist
+            )
         if candidates_feature_dict:
             scores = self.get_scores(
                 current_instances, candidates_feature_dict, max_dist
@@ -515,12 +742,25 @@ class Tracker:
             current_tracked_instances = self.candidate.add_new_tracks(
                 current_instances, existing_track_ids=list(self._track_objects.keys())
             )
+            current_tracked_instances = self.candidate.add_new_tracks(
+                current_instances, existing_track_ids=list(self._track_objects.keys())
+            )
 
         # Convert the `current_instances` back to `List[sio.PredictedInstance]` objects.
         if self.is_local_queue:
             new_pred_instances = []
             for instance in current_tracked_instances:
                 if instance.track_id is not None:
+                    if instance.track_id not in self._track_objects:
+                        self._track_objects[instance.track_id] = sio.Track(
+                            instance.track_id
+                        )
+                    instance.src_instance.track = self._track_objects[instance.track_id]
+                    instance.src_instance.tracking_score = instance.tracking_score
+                else:
+                    self.candidate.add_new_tracks(
+                        [instance], existing_track_ids=self._track_objects.keys()
+                    )
                     if instance.track_id not in self._track_objects:
                         self._track_objects[instance.track_id] = sio.Track(
                             instance.track_id
@@ -591,7 +831,9 @@ class Tracker:
     def generate_candidates(self):
         """Get the tracked instances from tracker queue."""
         return self.update_candidates(self.candidate.tracker_queue)
+        return self.update_candidates(self.candidate.tracker_queue)
 
+    def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
     def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
         """Return dictionary with the features of tracked instances.
 
@@ -630,12 +872,41 @@ class Tracker:
                             shifted_keypoints=None,
                         )
                         candidates_feature_dict.append(tracked_instance_feature)
+        if self.is_local_queue:
+            candidates_feature_dict = defaultdict(list)
+            for track_id in self.candidate.current_tracks:
+                candidates_feature_dict[track_id].extend(
+                    self.candidate.get_features_from_track_id(track_id, candidates_list)
+                )
+                if all(x.feature is None for x in candidates_feature_dict[track_id]):
+                    self.candidate.current_tracks.remove(track_id)
+                    del self.candidate.tracker_queue[track_id]
+                    del candidates_feature_dict[track_id]
+        else:
+            candidates_feature_dict = deque()
+            # For fixed window, candidates_list is a deque of TrackInstances
+            for track_id in self.candidate.current_tracks:
+                for track_instance in candidates_list:
+                    if track_id in track_instance.track_ids:
+                        track_idx = track_instance.track_ids.index(track_id)
+                        tracked_instance_feature = TrackedInstanceFeature(
+                            feature=track_instance.features[track_idx],
+                            src_predicted_instance=track_instance.src_instances[
+                                track_idx
+                            ],
+                            frame_idx=track_instance.frame_idx,
+                            tracking_score=track_instance.tracking_scores[track_idx],
+                            instance_score=track_instance.instance_scores[track_idx],
+                            shifted_keypoints=None,
+                        )
+                        candidates_feature_dict.append(tracked_instance_feature)
         return candidates_feature_dict
 
     def get_scores(
         self,
         current_instances: Union[TrackInstances, List[TrackInstanceLocalQueue]],
         candidates_feature_dict: Dict[int, TrackedInstanceFeature],
+        max_dist: int = None,
         max_dist: int = None,
     ):
         """Compute association score between untracked and tracked instances.
@@ -649,6 +920,8 @@ class Tracker:
                 with features and unassigned tracks.
             candidates_feature_dict: Dictionary with keys as track IDs and values as the
                 list of `TrackedInstanceFeature`.
+            max_dist: Maximum distance (in pixels) between centroids to consider a match.
+                If None, no distance constraint is applied.
             max_dist: Maximum distance (in pixels) between centroids to consider a match.
                 If None, no distance constraint is applied.
 
@@ -732,6 +1005,57 @@ class Tracker:
                     scores[track_id][f_idx] = oks
                 else:
                     scores[track_id][f_idx] = -1e10
+                # Ensure features are numpy arrays
+                f = np.array(f) if not isinstance(f, np.ndarray) else f
+
+                # Process each candidate feature
+                oks = []
+                for x in candidates_feature_dict[track_id]:
+                    if x.feature is not None:
+                        # Ensure candidate feature is a numpy array
+                        candidate_feature = (
+                            np.array(x.feature)
+                            if not isinstance(x.feature, np.ndarray)
+                            else x.feature
+                        )
+
+                        # If max_dist is set, check the distance between current instance and last instance of the track
+                        if max_dist is not None:
+                            last_instance = next(
+                                (
+                                    x
+                                    for x in reversed(candidates_feature_dict[track_id])
+                                    if x.feature is not None
+                                ),
+                                None,
+                            )
+                            if last_instance is not None:
+                                distance = np.linalg.norm(
+                                    get_centroid(f)
+                                    - get_centroid(last_instance.feature)
+                                )
+                                if distance > max_dist:
+                                    oks.append(
+                                        -1e10
+                                    )  # Using a very large negative number instead of -inf
+                                    continue
+
+                        score = scoring_method(f, candidate_feature)
+                        oks.append(score)
+                    else:
+                        if self.scoring_reduction == "weighted":
+                            oks.append(-1e10)
+                        else:
+                            oks.append(np.nan)
+
+                # Apply scoring reduction
+                if oks:
+                    if np.all(isinstance(x, np.ndarray) for x in oks):
+                        oks = [x[0][0] if isinstance(x, np.ndarray) else x for x in oks]
+                    oks = scoring_reduction(oks)  # scoring reduction
+                    scores[track_id][f_idx] = oks
+                else:
+                    scores[track_id][f_idx] = -1e10
         return scores
 
     def scores_to_cost_matrix(self, scores: np.ndarray):
@@ -740,6 +1064,7 @@ class Tracker:
         cost_matrix = {
             track_id: -scores[track_id] for track_id in self.candidate.current_tracks
         }
+
 
         return cost_matrix
 
@@ -771,6 +1096,12 @@ class Tracker:
                 current_instances, existing_track_ids=self._track_objects.keys()
             )
 
+        # If cost matrix is empty, create new tracks for all instances
+        if not cost_matrix:
+            return self.candidate.add_new_tracks(
+                current_instances, existing_track_ids=self._track_objects.keys()
+            )
+
         # Get best track matches and scores directly from cost dictionary
         tracking_scores = []
         matched_track_ids = []
@@ -784,7 +1115,18 @@ class Tracker:
         # Use Hungarian algorithm to find optimal matching if there are valid tracks
         if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
             row_ind, col_ind = matching_method(costs_array)
+        # Use Hungarian algorithm to find optimal matching if there are valid tracks
+        if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
+            row_ind, col_ind = matching_method(costs_array)
 
+            for row, col in zip(row_ind, col_ind):
+                score = -costs_array[row, col]  # Convert cost back to score
+                if (
+                    score > -1e10 and score < self.max_cost if self.max_cost else True
+                ):  # Only assign track if score is below threshold
+                    tracking_scores.append(score)
+                    matched_track_ids.append(track_ids[row])
+                    matched_instance_indices.append(col)
             for row, col in zip(row_ind, col_ind):
                 score = -costs_array[row, col]  # Convert cost back to score
                 if (
@@ -801,6 +1143,7 @@ class Tracker:
             matched_track_ids,
             tracking_scores,
             add_to_queue,
+            existing_track_ids=list(self._track_objects.keys()),
             existing_track_ids=list(self._track_objects.keys()),
         )
 
