@@ -156,7 +156,6 @@ class Tracker:
         of_window_size: int = 21,
         of_max_levels: int = 3,
         max_cost: float = None,
-        max_cost: float = None,
     ):
         """Create `Tracker` from config.
 
@@ -305,65 +304,6 @@ class Tracker:
         Given an instance and global track ID, finds all consecutive instances in previous frames
         that have the same track ID, up to 300 frames back. Stops if it encounters the global track ID
         or if the matching instance's tracklet ID is already in global_track_ids.
-    def update_track_id_and_queue(
-        self, tracklet_id, global_track_id, frame_idx, labels
-    ):
-        """Update track ID and queue for a tracklet.
-
-        Updates the track ID of a tracklet and its corresponding queue entries to use a new global track ID.
-        If the tracklet ID is not already in global_track_ids, updates the candidate's current tracks and
-        tracker queue to use the new global ID. Otherwise, updates the tracker queue with instances from
-        the recent frames.
-
-        Args:
-            tracklet_id (Track): The current track ID of the tracklet
-            global_track_id (Track): The new global track ID to assign
-            frame_idx (int): Current frame index
-            labels (Labels): Labels object containing tracked instances
-        """
-        if tracklet_id.name not in self.global_track_ids:
-            if tracklet_id.name in self.candidate.current_tracks:
-                self.candidate.current_tracks.remove(tracklet_id.name)
-            if global_track_id.name not in self.candidate.current_tracks:
-                self.candidate.current_tracks.append(global_track_id.name)
-            # self._track_objects.pop(tracklet_id.name)
-            self._track_objects[global_track_id.name] = global_track_id
-
-            self.candidate.tracker_queue[global_track_id.name] = (
-                self.candidate.tracker_queue.pop(tracklet_id.name, [])
-            )
-            for val in self.candidate.tracker_queue[global_track_id.name]:
-                val.track_id = global_track_id.name
-
-        else:
-            for lf in labels[frame_idx - self.candidate.window_size : frame_idx + 1]:
-                updated_track_ids = set()
-                for inst in lf.instances:
-                    self.candidate.tracker_queue[inst.track.name].append(
-                        self.get_features([inst], lf.frame_idx, lf.image)[0]
-                    )
-                    updated_track_ids.add(inst.track.name)
-
-                for track_id in self.candidate.current_tracks:
-                    if track_id not in updated_track_ids:
-                        empty_instance = TrackInstanceLocalQueue(
-                            src_instance=None,
-                            src_instance_idx=None,
-                            feature=None,
-                            instance_score=0.0,
-                            track_id=track_id,
-                            tracking_score=0.0,
-                            frame_idx=lf.frame_idx,
-                            image=lf.image,
-                        )
-                        self.candidate.tracker_queue[track_id].append(empty_instance)
-
-    def get_tracklet(self, matching_instance, global_track_id, labels, frame_idx):
-        """Get the tracklet (sequence of instances) associated with a given instance.
-
-        Given an instance and global track ID, finds all consecutive instances in previous frames
-        that have the same track ID, up to 300 frames back. Stops if it encounters the global track ID
-        or if the matching instance's tracklet ID is already in global_track_ids.
 
         Args:
             matching_instance (Instance): The instance to find the tracklet for
@@ -376,75 +316,6 @@ class Tracker:
             frame_idx (int): Current frame index
 
         Returns:
-            list[Instance] or None: List of instances in the tracklet if found, None if no matching instance
-        """
-        if matching_instance:
-            tracklet_id = matching_instance.track
-            before_frames = [
-                labels.find(frame_idx=frame, video=labels.video, return_new=True)[0]
-                for frame in range(frame_idx - 1, max(frame_idx - 300, -1), -1)
-            ]
-
-            tracklet = [matching_instance]
-
-            for lf in before_frames:
-                if any(
-                    inst.track.name == global_track_id.name for inst in lf.instances
-                ):
-                    break
-                for inst in lf.instances:
-                    if inst.track.name == tracklet_id.name:
-                        if inst.track.name in self.global_track_ids:
-                            return tracklet
-                        tracklet.append(inst)
-            return tracklet
-        return None
-
-    def id_tracklet(self, tracked_instances, new_instances, labels, frame_idx):
-        """Update track IDs for a set of tracked instances.
-
-        Given a list of tracked instances with their global track IDs, updates the track IDs
-        of matching instances in the current frame. For each tracked instance, finds any matching
-        tracklets and updates their track IDs to use the global track ID.
-
-        Args:
-            tracked_instances (List[Tuple[np.ndarray, str]]): List of tuples containing instance
-            coordinates and their global track IDs
-            new_instances (List[Instance]): List of instances in current frame to update
-            labels (Labels): Labels object containing all tracked instances
-            frame_idx (int): Current frame index being processed
-
-        Returns:
-            List[Instance]: Updated list of instances with track IDs assigned
-        """
-        for inst_numpy, global_track_name in tracked_instances:
-            global_track_id = self._track_objects.get(global_track_name)
-
-            if not global_track_id:
-                global_track_id = sio.Track(name=global_track_name)
-                self._track_objects[global_track_name] = global_track_id
-
-            if any(global_track_name == inst.track.name for inst in new_instances):
-                continue
-            matching_instance = next(
-                i
-                for i in new_instances
-                if np.allclose(i.numpy(), inst_numpy, equal_nan=True)
-            )
-            tracklet_id = matching_instance.track
-            tracklet = self.get_tracklet(
-                matching_instance, global_track_id, labels, frame_idx
-            )
-
-            if tracklet:
-                for inst in tracklet:
-                    inst.track = global_track_id
-
-            self.update_track_id_and_queue(
-                tracklet_id, global_track_id, frame_idx, labels
-            )
-
-        return new_instances
             list[Instance] or None: List of instances in the tracklet if found, None if no matching instance
         """
         if matching_instance:
@@ -655,9 +526,6 @@ class Tracker:
         # Assign unique tracks back to labels.tracks
         labels.tracks = unique_tracks
 
-        for lf in labels:
-        labels.tracks = labels.tracks
-
         # Create new list of unique tracks first
         unique_tracks = []
         seen_names = set()
@@ -673,7 +541,6 @@ class Tracker:
             for inst in lf.instances:
                 if inst.track is not None:
                     inst.track = next(
-                        t for t in labels.tracks if t.name == inst.track.name
                         t for t in labels.tracks if t.name == inst.track.name
                     )
                 inst.skeleton = labels.skeleton
@@ -693,10 +560,8 @@ class Tracker:
     def track_frame(
         self,
         instances: List[sio.PredictedInstance],
-        instances: List[sio.PredictedInstance],
         frame_idx: int,
         image: np.ndarray = None,
-        max_dist: int = None,
         max_dist: int = None,
         add_to_queue: bool = False,
     ) -> List[sio.PredictedInstance]:
@@ -767,16 +632,6 @@ class Tracker:
                         )
                     instance.src_instance.track = self._track_objects[instance.track_id]
                     instance.src_instance.tracking_score = instance.tracking_score
-                else:
-                    self.candidate.add_new_tracks(
-                        [instance], existing_track_ids=self._track_objects.keys()
-                    )
-                    if instance.track_id not in self._track_objects:
-                        self._track_objects[instance.track_id] = sio.Track(
-                            str(instance.track_id)
-                        )
-                    instance.src_instance.track = self._track_objects[instance.track_id]
-                    instance.src_instance.tracking_score = instance.tracking_score
                 new_pred_instances.append(instance.src_instance)
 
         else:
@@ -833,7 +688,6 @@ class Tracker:
         return self.update_candidates(self.candidate.tracker_queue)
         return self.update_candidates(self.candidate.tracker_queue)
 
-    def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
     def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
         """Return dictionary with the features of tracked instances.
 
@@ -906,7 +760,6 @@ class Tracker:
         self,
         current_instances: Union[TrackInstances, List[TrackInstanceLocalQueue]],
         candidates_feature_dict: Dict[int, TrackedInstanceFeature],
-        max_dist: int = None,
         max_dist: int = None,
     ):
         """Compute association score between untracked and tracked instances.
