@@ -10,6 +10,7 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 import logging
 from sklearn.preprocessing import StandardScaler
+from hmmlearn import hmm
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -79,32 +80,11 @@ class Tracker:
     use_flow: bool = False
     is_local_queue: bool = False
     max_cost: float = 0.5
-    max_cost: float = 0.5
     _scoring_functions: Dict[str, Any] = {
         "oks": compute_oks,
         "iou": compute_iou,
         "cosine_sim": compute_cosine_sim,
         "euclidean_dist": compute_euclidean_distance,
-    }
-    _scoring_reduction_methods: Dict[str, Any] = {
-        "mean": np.nanmean,
-        "max": np.nanmax,
-        "weighted": lambda x: (
-            np.average(
-                np.array(x),
-                weights=np.maximum(
-                    1e-10,
-                    1
-                    - (
-                        np.abs(np.arange(len(np.array(x))) - (len(np.array(x)) - 1))
-                        / len(np.array(x))
-                    ),
-                ),
-                axis=0,
-            )
-            if len(np.array(x).shape) > 0
-            else x  # Return the scalar value directly if x is a scalar
-        ),
     }
     _scoring_reduction_methods: Dict[str, Any] = {
         "mean": np.nanmean,
@@ -135,8 +115,6 @@ class Tracker:
         "hungarian": hungarian_matching,
         "greedy": greedy_matching,
     }
-    _track_objects: Dict[str, sio.Track] = attrs.field(factory=dict)
-    global_track_ids: List[str] = attrs.field(factory=list)
     _track_objects: Dict[str, sio.Track] = attrs.field(factory=dict)
     global_track_ids: List[str] = attrs.field(factory=list)
 
@@ -193,8 +171,6 @@ class Tracker:
                 Default: 3. (only if `use_flow` is True)
             max_cost: Maximum cost threshold for track assignment. If the matching score is
                 greater than this threshold, the track will not be assigned. Default: None.
-            max_cost: Maximum cost threshold for track assignment. If the matching score is
-                greater than this threshold, the track will not be assigned. Default: None.
 
         """
         if candidates_method == "fixed_window":
@@ -229,7 +205,6 @@ class Tracker:
                 of_max_levels=of_max_levels,
                 is_local_queue=is_local_queue,
                 max_cost=max_cost,
-                max_cost=max_cost,
             )
 
         tracker = cls(
@@ -240,7 +215,6 @@ class Tracker:
             track_matching_method=track_matching_method,
             use_flow=use_flow,
             is_local_queue=is_local_queue,
-            max_cost=max_cost,
             max_cost=max_cost,
         )
         return tracker
@@ -391,7 +365,7 @@ class Tracker:
         labels: sio.Labels,
         max_dist: int = None,
         inplace: bool = False,
-        model_config: Dict[str, Any] = None,
+        n_hmm_components: int = None,
     ):
         """Track instances across frames.
 
@@ -444,44 +418,11 @@ class Tracker:
                 found_label[0].instances.append(inst)
 
             sorted_labels.append(found_label[0])
-            found_label = labels.find(
-                frame_idx=frame_idx, video=labels.video, return_new=True
-            )
-            inst_to_remove = []
-            inst_to_add = []
-            for inst in found_label[0]:
-                if not isinstance(inst, sio.PredictedInstance):
-                    new_inst = sio.PredictedInstance(
-                        skeleton=inst.skeleton,
-                        points={
-                            node: sio.PredictedPoint(
-                                x=point.x,
-                                y=point.y,
-                                visible=point.visible,
-                                complete=point.complete,
-                                score=1.0,
-                            )
-                            for node, point in inst.points.items()
-                        },
-                        track=inst.track,
-                        score=1.00,
-                        tracking_score=0,
-                    )
-                    inst_to_add.append(new_inst)
-                    inst_to_remove.append(inst)
-            for inst in inst_to_remove:
-                found_label[0].instances.remove(inst)
-            for inst in inst_to_add:
-                found_label[0].instances.append(inst)
-
-            sorted_labels.append(found_label[0])
         labels.labeled_frames = sorted_labels
 
-        self.global_track_ids = [t.name for t in labels.tracks]
+        self.global_track_ids = {t.name: t for t in labels.tracks}
 
-        self.global_track_ids = [t.name for t in labels.tracks]
-
-        for lf in labels:
+        for lf in tqdm(labels):
             if lf.instances:
                 tracked_instances = [
                     (inst.numpy(), inst.track.name)
@@ -504,16 +445,16 @@ class Tracker:
                         lf.frame_idx,
                     )
 
-        if model_config:
-            global_identity_model, identity_model_scaler = self.train_identity_model(
-                labels, model_config
+        if n_hmm_components:
+            n_hmm_states = len(self.global_track_ids)
+            hmm_model, feature_scaler = self.train_hmm_model(
+                labels, n_hmm_states, n_hmm_components
             )
             self.infer_and_assign_untracked_identities(
-                labels, global_identity_model, identity_model_scaler
+                labels, hmm_model, feature_scaler
             )
 
         labels.update()
-        labels.tracks = labels.tracks
 
         # Create new list of unique tracks first
         unique_tracks = []
@@ -526,35 +467,24 @@ class Tracker:
         # Assign unique tracks back to labels.tracks
         labels.tracks = unique_tracks
 
-        # Create new list of unique tracks first
-        unique_tracks = []
-        seen_names = set()
-        for track in labels.tracks:
-            if track.name not in seen_names:
-                unique_tracks.append(track)
-                seen_names.add(track.name)
-
-        # Assign unique tracks back to labels.tracks
-        labels.tracks = unique_tracks
-
+        # Consolidate skeleton assignment
         for lf in labels:
             for inst in lf.instances:
                 if inst.track is not None:
-                    inst.track = next(
-                        t for t in labels.tracks if t.name == inst.track.name
-                    )
-                inst.skeleton = labels.skeleton
-                # inst.points = {
-                #     i: point for i, (node, point) in enumerate(inst.points.items())
-                # }
+                    # Ensure inst.track points to the unique track object from the updated labels.tracks list
+                    try:
+                        inst.track = next(
+                            t for t in labels.tracks if t.name == inst.track.name
+                        )
+                    except StopIteration:
+                        logger.warning(f"Track with name {inst.track.name} not found in unique tracks. Instance will have no track.")
+                        inst.track = None # Or handle as an error
                 inst.skeleton = labels.skeleton
                 # inst.points = {
                 #     i: point for i, (node, point) in enumerate(inst.points.items())
                 # }
 
-        labels.update()
-        return labels
-        labels.update()
+        labels.update() # Call update again after potentially re-assigning track objects
         return labels
 
     def track_frame(
@@ -573,26 +503,18 @@ class Tracker:
 
         Args:
             instances (List[sio.PredictedInstance]): The list of instances to assign track IDs to.
-            instances (List[sio.PredictedInstance]): The list of instances to assign track IDs to.
             frame_idx (int): The index of the current frame.
             image (np.ndarray): The image of the current frame.
             add_to_queue (bool): If True, the instances will be added to the tracker queue.
-            max_dist (int): The maximum pixel distance between instances to consider a match.
             max_dist (int): The maximum pixel distance between instances to consider a match.
 
         Returns:
             List[sio.PredictedInstance]: The list of instances with assigned track IDs.
         """
         current_instances = self.get_features(instances, frame_idx, image)
-        current_instances = self.get_features(instances, frame_idx, image)
 
         candidates_feature_dict = self.generate_candidates()
-        candidates_feature_dict = self.generate_candidates()
 
-        if candidates_feature_dict:
-            scores = self.get_scores(
-                current_instances, candidates_feature_dict, max_dist
-            )
         if candidates_feature_dict:
             scores = self.get_scores(
                 current_instances, candidates_feature_dict, max_dist
@@ -604,9 +526,6 @@ class Tracker:
             )
 
         else:
-            current_tracked_instances = self.candidate.add_new_tracks(
-                current_instances, existing_track_ids=list(self._track_objects.keys())
-            )
             current_tracked_instances = self.candidate.add_new_tracks(
                 current_instances, existing_track_ids=list(self._track_objects.keys())
             )
@@ -686,7 +605,6 @@ class Tracker:
     def generate_candidates(self):
         """Get the tracked instances from tracker queue."""
         return self.update_candidates(self.candidate.tracker_queue)
-        return self.update_candidates(self.candidate.tracker_queue)
 
     def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
         """Return dictionary with the features of tracked instances.
@@ -700,60 +618,35 @@ class Tracker:
         """
         if self.is_local_queue:
             candidates_feature_dict = defaultdict(list)
-            for track_id in self.candidate.current_tracks:
-                candidates_feature_dict[track_id].extend(
-                    self.candidate.get_features_from_track_id(track_id, candidates_list)
-                )
-                if all(x.feature is None for x in candidates_feature_dict[track_id]):
-                    self.candidate.current_tracks.remove(track_id)
-                    del self.candidate.tracker_queue[track_id]
-                    del candidates_feature_dict[track_id]
+            for track_id in list(self.candidate.current_tracks): # Iterate over a copy if modifying during iteration
+                track_features = self.candidate.get_features_from_track_id(track_id, candidates_list)
+                if all(x.feature is None for x in track_features):
+                    if track_id in self.candidate.current_tracks: # Check if still present before removing
+                        self.candidate.current_tracks.remove(track_id)
+                    if track_id in self.candidate.tracker_queue:
+                        del self.candidate.tracker_queue[track_id]
+                    # No need to delete from candidates_feature_dict as it's being built
+                else:
+                    candidates_feature_dict[track_id].extend(track_features)
         else:
             candidates_feature_dict = deque()
             # For fixed window, candidates_list is a deque of TrackInstances
-            for track_id in self.candidate.current_tracks:
-                for track_instance in candidates_list:
-                    if track_id in track_instance.track_ids:
-                        track_idx = track_instance.track_ids.index(track_id)
+            # This part assumes candidates_list is a deque of TrackInstances objects
+            # and self.candidate.current_tracks contains the track_ids to look for.
+            active_track_ids_in_deque = set()
+            for track_instance_container in candidates_list: # This is a Deque[TrackInstances]
+                for idx, track_id in enumerate(track_instance_container.track_ids):
+                    if track_id in self.candidate.current_tracks:
                         tracked_instance_feature = TrackedInstanceFeature(
-                            feature=track_instance.features[track_idx],
-                            src_predicted_instance=track_instance.src_instances[
-                                track_idx
-                            ],
-                            frame_idx=track_instance.frame_idx,
-                            tracking_score=track_instance.tracking_scores[track_idx],
-                            instance_score=track_instance.instance_scores[track_idx],
-                            shifted_keypoints=None,
+                            feature=track_instance_container.features[idx],
+                            src_predicted_instance=track_instance_container.src_instances[idx],
+                            frame_idx=track_instance_container.frame_idx,
+                            tracking_score=track_instance_container.tracking_scores[idx],
+                            instance_score=track_instance_container.instance_scores[idx],
+                            shifted_keypoints=None, # This is not FlowShiftTracker
                         )
                         candidates_feature_dict.append(tracked_instance_feature)
-        if self.is_local_queue:
-            candidates_feature_dict = defaultdict(list)
-            for track_id in self.candidate.current_tracks:
-                candidates_feature_dict[track_id].extend(
-                    self.candidate.get_features_from_track_id(track_id, candidates_list)
-                )
-                if all(x.feature is None for x in candidates_feature_dict[track_id]):
-                    self.candidate.current_tracks.remove(track_id)
-                    del self.candidate.tracker_queue[track_id]
-                    del candidates_feature_dict[track_id]
-        else:
-            candidates_feature_dict = deque()
-            # For fixed window, candidates_list is a deque of TrackInstances
-            for track_id in self.candidate.current_tracks:
-                for track_instance in candidates_list:
-                    if track_id in track_instance.track_ids:
-                        track_idx = track_instance.track_ids.index(track_id)
-                        tracked_instance_feature = TrackedInstanceFeature(
-                            feature=track_instance.features[track_idx],
-                            src_predicted_instance=track_instance.src_instances[
-                                track_idx
-                            ],
-                            frame_idx=track_instance.frame_idx,
-                            tracking_score=track_instance.tracking_scores[track_idx],
-                            instance_score=track_instance.instance_scores[track_idx],
-                            shifted_keypoints=None,
-                        )
-                        candidates_feature_dict.append(tracked_instance_feature)
+                        active_track_ids_in_deque.add(track_id)
         return candidates_feature_dict
 
     def get_scores(
@@ -773,8 +666,6 @@ class Tracker:
                 with features and unassigned tracks.
             candidates_feature_dict: Dictionary with keys as track IDs and values as the
                 list of `TrackedInstanceFeature`.
-            max_dist: Maximum distance (in pixels) between centroids to consider a match.
-                If None, no distance constraint is applied.
             max_dist: Maximum distance (in pixels) between centroids to consider a match.
                 If None, no distance constraint is applied.
 
@@ -858,57 +749,6 @@ class Tracker:
                     scores[track_id][f_idx] = oks
                 else:
                     scores[track_id][f_idx] = -1e10
-                # Ensure features are numpy arrays
-                f = np.array(f) if not isinstance(f, np.ndarray) else f
-
-                # Process each candidate feature
-                oks = []
-                for x in candidates_feature_dict[track_id]:
-                    if x.feature is not None:
-                        # Ensure candidate feature is a numpy array
-                        candidate_feature = (
-                            np.array(x.feature)
-                            if not isinstance(x.feature, np.ndarray)
-                            else x.feature
-                        )
-
-                        # If max_dist is set, check the distance between current instance and last instance of the track
-                        if max_dist is not None:
-                            last_instance = next(
-                                (
-                                    x
-                                    for x in reversed(candidates_feature_dict[track_id])
-                                    if x.feature is not None
-                                ),
-                                None,
-                            )
-                            if last_instance is not None:
-                                distance = np.linalg.norm(
-                                    get_centroid(f)
-                                    - get_centroid(last_instance.feature)
-                                )
-                                if distance > max_dist:
-                                    oks.append(
-                                        -1e10
-                                    )  # Using a very large negative number instead of -inf
-                                    continue
-
-                        score = scoring_method(f, candidate_feature)
-                        oks.append(score)
-                    else:
-                        if self.scoring_reduction == "weighted":
-                            oks.append(-1e10)
-                        else:
-                            oks.append(np.nan)
-
-                # Apply scoring reduction
-                if oks:
-                    if np.all(isinstance(x, np.ndarray) for x in oks):
-                        oks = [x[0][0] if isinstance(x, np.ndarray) else x for x in oks]
-                    oks = scoring_reduction(oks)  # scoring reduction
-                    scores[track_id][f_idx] = oks
-                else:
-                    scores[track_id][f_idx] = -1e10
         return scores
 
     def scores_to_cost_matrix(self, scores: np.ndarray):
@@ -917,7 +757,6 @@ class Tracker:
         cost_matrix = {
             track_id: -scores[track_id] for track_id in self.candidate.current_tracks
         }
-
 
         return cost_matrix
 
@@ -949,44 +788,36 @@ class Tracker:
                 current_instances, existing_track_ids=self._track_objects.keys()
             )
 
-        # If cost matrix is empty, create new tracks for all instances
-        if not cost_matrix:
-            return self.candidate.add_new_tracks(
-                current_instances, existing_track_ids=self._track_objects.keys()
-            )
-
-        # Get best track matches and scores directly from cost dictionary
         tracking_scores = []
         matched_track_ids = []
         matched_instance_indices = []
         matching_method = self._track_matching_methods[self.track_matching_method]
 
         # Convert cost_matrix dict to numpy array for Hungarian algorithm
-        track_ids = list(cost_matrix.keys())
-        costs_array = np.array([cost_matrix[tid] for tid in track_ids])
+        # Filter out tracks from cost_matrix that have empty cost lists, as they can cause issues
+        valid_track_ids = [tid for tid, costs in cost_matrix.items() if costs.size > 0]
+        if not valid_track_ids:
+            # All tracks had empty cost lists, so no matching is possible.
+            return self.candidate.add_new_tracks(
+                current_instances, existing_track_ids=list(self._track_objects.keys())
+            )
+            
+        costs_array = np.array([cost_matrix[tid] for tid in valid_track_ids])
 
         # Use Hungarian algorithm to find optimal matching if there are valid tracks
-        if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
-            row_ind, col_ind = matching_method(costs_array)
-        # Use Hungarian algorithm to find optimal matching if there are valid tracks
+        if costs_array.ndim == 1: # Handle case where there's only one valid track_id with costs
+            costs_array = costs_array.reshape(1, -1)
+            
         if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
             row_ind, col_ind = matching_method(costs_array)
 
             for row, col in zip(row_ind, col_ind):
                 score = -costs_array[row, col]  # Convert cost back to score
                 if (
-                    score > -1e10 and score < self.max_cost if self.max_cost else True
-                ):  # Only assign track if score is below threshold
+                    score > -1e10 and (self.max_cost is None or score < self.max_cost)
+                ):  # Only assign track if score is below threshold or no threshold
                     tracking_scores.append(score)
-                    matched_track_ids.append(track_ids[row])
-                    matched_instance_indices.append(col)
-            for row, col in zip(row_ind, col_ind):
-                score = -costs_array[row, col]  # Convert cost back to score
-                if (
-                    score > -1e10 and score < self.max_cost if self.max_cost else True
-                ):  # Only assign track if score is below threshold
-                    tracking_scores.append(score)
-                    matched_track_ids.append(track_ids[row])
+                    matched_track_ids.append(valid_track_ids[row]) # Use valid_track_ids here
                     matched_instance_indices.append(col)
 
         # Update tracker queue and assign track IDs
@@ -997,18 +828,17 @@ class Tracker:
             tracking_scores,
             add_to_queue,
             existing_track_ids=list(self._track_objects.keys()),
-            existing_track_ids=list(self._track_objects.keys()),
         )
 
         return current_tracked_instances
 
-    def train_identity_model(self, labels: sio.Labels, model_config: Dict[str, Any]):
+    def train_hmm_model(self, labels: sio.Labels, n_hmm_states: int, n_hmm_components: int):
         """Train an identity assignment model using tracked instances.
 
         Args:
             labels: Labels object containing all instances.
-            model_config: Dictionary specifying the model type and its parameters.
-                          Example: {"type": "hmm", "params": {"n_components": 5, ...}}
+            n_hmm_states: Number of states in the HMM.
+            n_hmm_components: Number of components in the HMM.
         """
 
         # Group instances by global track ID
@@ -1018,7 +848,6 @@ class Tracker:
         for lf in labels:
             for inst in lf.instances:
                 if inst.track is not None and inst.track.name in self.global_track_ids:
-                    # Assuming self.extract_pose_features is available and appropriate
                     features = self.extract_pose_features(inst)
                     tracked_sequences[inst.track.name].append(features)
 
@@ -1030,26 +859,15 @@ class Tracker:
                 sequences.append(np.array(seq))
                 lengths.append(len(seq))
 
-        if not sequences:
-            logger.info("No tracked sequences found for model training.")
-            global_identity_model = None
-            identity_model_scaler = None
-            return
-
         # Concatenate all sequences
         X = np.vstack(sequences)
 
         # Initialize and fit scaler
         feature_scaler = StandardScaler()
         X_scaled = feature_scaler.fit_transform(X)
-        identity_model_scaler = feature_scaler  # Store the scaler for inference
 
         # Check for NaN values in scaled features
         if np.isnan(X_scaled).any():
-            logger.warning(
-                "Scaled features contain NaN values. Attempting to remove them."
-            )
-            logger.warning(f"Number of NaN values: {np.isnan(X_scaled).sum()}")
 
             valid_mask = ~np.isnan(X_scaled).any(axis=1)
             X_scaled = X_scaled[valid_mask]
@@ -1065,245 +883,98 @@ class Tracker:
                 current_pos += length
             lengths = new_lengths
 
-            if not X_scaled.size or not lengths:
-                logger.warning(
-                    "No valid sequences remaining after NaN removal for model training."
-                )
-                global_identity_model = None
-                # Keep the scaler as it was fit on original data before NaN check on X_scaled
-                return
+        # Initialize HMM
+        hmm_model = hmm.GaussianHMM(
+            n_components=n_hmm_states,
+            covariance_type="full",
+            random_state=42
+        )
 
-        # Model Initialization and Training
-        model_type = model_config.get("type")
-        if not model_type:
-            raise ValueError("Model type must be specified in model_config.")
+        # Fit HMM
+        hmm_model.fit(X_scaled, lengths=lengths)
 
-        model_params = model_config.get("params", {})
-        current_model = None
-
-        if model_type.lower() == "hmm":
-            try:
-                from hmmlearn import hmm
-            except ImportError:
-                logger.error(
-                    "hmmlearn package is required for HMM model. Please install it."
-                )
-                raise
-
-            n_components = model_params.get("n_components", 5)
-            covariance_type = model_params.get("covariance_type", "full")
-            random_state = model_params.get("random_state", 42)
-            # Add any other HMM parameters from model_params, e.g., n_iter, tol
-            hmm_params = {
-                "n_components": n_components,
-                "covariance_type": covariance_type,
-                "random_state": random_state,
-                **{
-                    k: v
-                    for k, v in model_params.items()
-                    if k not in ["n_components", "covariance_type", "random_state"]
-                },
-            }
-            current_model = hmm.GaussianHMM(**hmm_params)
-            logger.info(f"Initializing HMM with parameters: {hmm_params}")
-        # Example for another model type:
-        # elif model_type.lower() == "transformer":
-        #     # from .models import TransformerIdentityModel # Example import
-        #     # current_model = TransformerIdentityModel(**model_params)
-        #     logger.info(f"Initializing Transformer model with parameters: {model_params}")
-        #     raise NotImplementedError("Transformer model training not yet implemented.")
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}")
-
-        try:
-            logger.info(f"Fitting {model_type} model...")
-            if model_type.lower() == "hmm":  # HMM's fit method uses lengths
-                current_model.fit(X_scaled, lengths=lengths)
-            else:
-                # Assume other models might have a simpler fit or need X_scaled and labels/targets
-                # This part needs to be adapted based on the common interface for your models
-                current_model.fit(
-                    X_scaled
-                )  # Or current_model.fit(sequences_scaled, sequence_labels)
-
-            global_identity_model = current_model
-            logger.info(f"Successfully trained {model_type} model.")
-            if model_type.lower() == "hmm":
-                logger.info(
-                    f"  HMM - n_components: {current_model.n_components}, converged: {current_model.monitor_.converged}"
-                )
-
-        except Exception as e:
-            logger.error(f"Error training {model_type} model: {e}")
-            global_identity_model = None  # Ensure model is not set if training failed
-            identity_model_scaler = None  # Also clear scaler if training failed
-            # Optionally re-raise the exception if the caller should handle it
-            # raise
-
-        return global_identity_model, identity_model_scaler
+        return hmm_model, feature_scaler
 
     def infer_and_assign_untracked_identities(
-        self, labels: sio.Labels, global_identity_model, identity_model_scaler
+        self, labels: sio.Labels, hmm_model, feature_scaler
     ):
         """Infer and assign identities to untracked instances using the trained model.
 
         Args:
             labels: Labels object containing all instances.
         """
-
-        if not global_identity_model or not identity_model_scaler:
-            logger.warning(
-                "Identity model or feature scaler is not available. "
-                "Run train_identity_model first."
-            )
-            return
-
-        if not self.global_track_ids:
-            logger.warning("No global track IDs defined to assign. Skipping inference.")
-            return
-
         tracklets = self.group_tracklets(labels)
 
         # Process each untracked tracklet
-        for track_id, instances_in_tracklet_with_frame_idx in tracklets.items():
-            is_local_tracklet = True
-            if track_id in self.global_track_ids:
-                is_local_tracklet = False  # This tracklet already has a global ID name
-
-            if (
-                is_local_tracklet
-            ):  # Only process tracklets that don't already have a global ID
-                if not instances_in_tracklet_with_frame_idx:
-                    logger.debug(f"Tracklet {track_id} is empty, skipping.")
-                    continue
-
+        for track_id, instances in tracklets.items():
+            if track_id not in self.global_track_ids:
                 # Sort instances by frame index
-                instances_in_tracklet_with_frame_idx.sort(key=lambda x: x[0])
-
-                frames = [item[0] for item in instances_in_tracklet_with_frame_idx]
-                actual_instances = [
-                    item[1] for item in instances_in_tracklet_with_frame_idx
-                ]
-
-                if not actual_instances:
-                    logger.debug(
-                        f"Tracklet {track_id} has no actual instances after unpacking, skipping."
-                    )
-                    continue
-
+                instances.sort(key=lambda x: x[0])
+                # Extract just the instances after sorting by frame
+                frames = [inst[0] for inst in instances]
+                instances = [inst[1] for inst in instances]
+                
                 # Extract features
-                # Assuming extract_pose_features is a static method or defined in the class
-                features = np.array(
-                    [self.extract_pose_features(inst) for inst in actual_instances]
-                )
-
-                if features.size == 0:
-                    logger.debug(
-                        f"No features extracted for tracklet {track_id}, skipping."
-                    )
-                    continue
-
+                features = np.array([self.extract_pose_features(inst) for inst in instances])
+                
                 # Scale features
-                features_scaled = identity_model_scaler.transform(features)
-
+                features_scaled = feature_scaler.transform(features)
                 # Check for NaN values in scaled features
                 if np.isnan(features_scaled).any():
-                    logger.warning(
-                        f"Scaled features for track {track_id} contain NaN values. Imputing with mean."
-                    )
-                    # Impute NaNs with the mean of the respective column
+                    print(f"Warning: Scaled features for track {track_id} contain NaN values")
+                    print(f"Number of NaN values: {np.isnan(features_scaled).sum()}")
+                    print(f"NaN locations: {np.where(np.isnan(features_scaled))}")
+                    # Remove rows with NaN values
+                    # Mask NaN values with the mean of each feature
                     for col in range(features_scaled.shape[1]):
                         col_mask = np.isnan(features_scaled[:, col])
                         if col_mask.any():
+                            # Replace NaN with mean of non-NaN values for this feature
                             col_mean = np.nanmean(features_scaled[:, col])
-                            if np.isnan(col_mean):
-                                # If entire column was NaN, use 0 or another placeholder
-                                col_mean = 0
                             features_scaled[col_mask, col] = col_mean
-                    if np.isnan(features_scaled).any():
-                        logger.error(
-                            f"Features for tracklet {track_id} still contain NaNs after imputation. Skipping."
-                        )
-                        continue  # Skip this tracklet if NaNs persist
-
-                if features_scaled.shape[0] == 0:
-                    logger.debug(
-                        f"Tracklet {track_id} has no features after scaling/NaN handling, skipping."
-                    )
-                    continue
-
-                # Predict global identity for the tracklet
-                # The model's predict_identity method should handle its internal logic
-                # and return a proposed global ID name from the available self.global_track_ids.
-                try:
-                    # We pass self.global_track_ids so the model knows the candidate pool.
-                    # The model's predict_identity should return the *name* of the chosen global ID.
-                    predicted_global_id_name = global_identity_model.predict(
-                        features_scaled
-                    )
-                except AttributeError as e:
-                    logger.error(
-                        f"The trained model does not have a 'predict_identity' method or it failed: {e}"
-                    )
-                    continue  # Skip to next tracklet
-                except Exception as e:
-                    logger.error(
-                        f"Error during model prediction for tracklet {track_id}: {e}"
-                    )
-                    continue
-
-                if (
-                    not predicted_global_id_name
-                    or predicted_global_id_name not in self._track_objects
-                ):
-                    logger.warning(
-                        f"Model predicted an invalid or unknown global ID '{predicted_global_id_name}' for tracklet {track_id}. Skipping."
-                    )
-                    continue
-
-                assigned_global_track_object = self._track_objects[
-                    predicted_global_id_name
-                ]
-
-                # Check if the proposed global track is already used in any frame of this tracklet by another instance
+                    if len(features_scaled) == 0:
+                        continue
+                
+                # Predict most likely state sequence
+                state_sequence = hmm_model.predict(features_scaled)
+                
+                # Get most likely global identity based on state sequence
+                # For now, we'll use a simple majority vote of states
+                from collections import Counter
+                state_counts = Counter(state_sequence)
+                most_common_state = state_counts.most_common(1)[0][0]
+                
+                # Map state to global identity (this is a simple mapping - could be improved)
+                global_track_names = list(self.global_track_ids.keys())
+                global_track_name = global_track_names[most_common_state % len(global_track_names)]
+                global_track = self.global_track_ids[global_track_name]
+                
+                # Check if the proposed global track is already used in any frame of this tracklet
                 is_track_available = True
-                for frame_idx, inst_to_assign in zip(frames, actual_instances):
-                    # labels[frame_idx] should give a LabeledFrame object
-                    lf = labels.find(frame_idx=frame_idx, video=labels.video)[0]
-                    if lf:
-                        for existing_inst in lf.instances:
-                            if (
-                                existing_inst != inst_to_assign
-                                and existing_inst.track == assigned_global_track_object
-                            ):
-                                is_track_available = False
-                                break
+                for frame, inst in zip(frames, instances):
+                    existing_instances = [i for i in labels[frame].instances if i != inst]
+                    if any(i.track == global_track for i in existing_instances):
+                        is_track_available = False
+                        break
+                
+                # If the track is not available, find the next available track
                 if not is_track_available:
-                    break
-
-                if not is_track_available:
-                    # Simple strategy: if predicted ID is taken, try to find an alternative
-                    # This could be made more sophisticated (e.g. using model scores for alternatives)
-                    logger.warning(
-                        f"Predicted global ID {predicted_global_id_name} for tracklet {track_id} is unavailable in some frames."
-                    )
-                    # For now, we just skip assignment if the preferred one is taken.
-                    # A more advanced strategy could be implemented here, e.g., trying next best prediction from model.
-                    # Or, iterate through self.global_track_ids to find one that *is* available.
-                    # This part of the logic from the notebook is complex and highly dependent on the model's output.
-                    # Simplified: if primary is unavailable, we skip for now.
-                    logger.info(
-                        f"Skipping assignment for tracklet {track_id} as preferred ID {predicted_global_id_name} is unavailable."
-                    )
-                    continue  # Or implement alternative assignment logic here
-
-                # Update track references for all instances in this tracklet
-                for inst_to_assign in actual_instances:
-                    inst_to_assign.track = assigned_global_track_object
-
-                logger.info(
-                    f"Assigned tracklet {track_id} to global identity {assigned_global_track_object.name}"
-                )
+                    for alternative_track_name in global_track_names:
+                        alternative_track = self.global_track_ids[alternative_track_name]
+                        if all(all(i.track != alternative_track for i in labels[frame].instances if i != inst) 
+                            for frame, inst in zip(frames, instances)):
+                            global_track = alternative_track
+                            global_track_name = alternative_track_name
+                            break
+                    else:
+                        print(f"Warning: No available global track for tracklet {track_id}")
+                        continue
+                
+                # Update track references
+                for inst in instances:
+                    inst.track = global_track
+                    
+                print(f"Assigned tracklet {track_id} to global identity {global_track_name}")
 
     def extract_pose_features(self, instance: sio.PredictedInstance) -> np.ndarray:
         """Extract pose features from an instance for HMM input.
