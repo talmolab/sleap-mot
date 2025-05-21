@@ -947,9 +947,7 @@ class Tracker:
 
         return state_sequence
 
-    def infer_identities_with_rts(
-        self, labels, hmm_model, feature_scaler
-    ):
+    def infer_identities_with_rts(self, labels, hmm_model, feature_scaler):
         """Infer and assign identities using RTS smoothing.
 
         Args:
@@ -1022,7 +1020,9 @@ class Tracker:
                 # If track is not available, find next available track
                 if not is_track_available:
                     for alternative_track_name in global_track_names:
-                        alternative_track = self.global_track_ids[alternative_track_name]
+                        alternative_track = self.global_track_ids[
+                            alternative_track_name
+                        ]
                         if all(
                             all(
                                 i.track != alternative_track
