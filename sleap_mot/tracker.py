@@ -338,13 +338,15 @@ class Tracker:
                 global_track_id = sio.Track(name=global_track_name)
                 self._track_objects[global_track_name] = global_track_id
 
-            if any(global_track_name == inst.track.name for inst in new_instances):
-                continue
             matching_instance = next(
                 i
                 for i in new_instances
                 if np.allclose(i.numpy(), inst_numpy, equal_nan=True)
             )
+
+            if matching_instance.track.name == global_track_name:
+                continue
+
             tracklet_id = matching_instance.track
             tracklet = self.get_tracklet(
                 matching_instance, global_track_id, labels, frame_idx
@@ -365,7 +367,7 @@ class Tracker:
         labels: sio.Labels,
         max_dist: int = None,
         inplace: bool = False,
-        n_hmm_components: int = None,
+        n_hmm_states: int = None,
     ):
         """Track instances across frames.
 
@@ -445,14 +447,9 @@ class Tracker:
                         lf.frame_idx,
                     )
 
-        if n_hmm_components:
-            n_hmm_states = len(self.global_track_ids)
-            hmm_model, feature_scaler = self.train_hmm_model(
-                labels, n_hmm_states, n_hmm_components
-            )
-            self.infer_and_assign_untracked_identities(
-                labels, hmm_model, feature_scaler
-            )
+        if n_hmm_states:
+            hmm_model, feature_scaler = self.train_hmm_with_rts(labels, n_hmm_states)
+            self.infer_identities_with_rts(labels, hmm_model, feature_scaler)
 
         labels.update()
 
@@ -477,14 +474,16 @@ class Tracker:
                             t for t in labels.tracks if t.name == inst.track.name
                         )
                     except StopIteration:
-                        logger.warning(f"Track with name {inst.track.name} not found in unique tracks. Instance will have no track.")
-                        inst.track = None # Or handle as an error
+                        logger.warning(
+                            f"Track with name {inst.track.name} not found in unique tracks. Instance will have no track."
+                        )
+                        inst.track = None  # Or handle as an error
                 inst.skeleton = labels.skeleton
                 # inst.points = {
                 #     i: point for i, (node, point) in enumerate(inst.points.items())
                 # }
 
-        labels.update() # Call update again after potentially re-assigning track objects
+        labels.update()  # Call update again after potentially re-assigning track objects
         return labels
 
     def track_frame(
@@ -618,10 +617,16 @@ class Tracker:
         """
         if self.is_local_queue:
             candidates_feature_dict = defaultdict(list)
-            for track_id in list(self.candidate.current_tracks): # Iterate over a copy if modifying during iteration
-                track_features = self.candidate.get_features_from_track_id(track_id, candidates_list)
+            for track_id in list(
+                self.candidate.current_tracks
+            ):  # Iterate over a copy if modifying during iteration
+                track_features = self.candidate.get_features_from_track_id(
+                    track_id, candidates_list
+                )
                 if all(x.feature is None for x in track_features):
-                    if track_id in self.candidate.current_tracks: # Check if still present before removing
+                    if (
+                        track_id in self.candidate.current_tracks
+                    ):  # Check if still present before removing
                         self.candidate.current_tracks.remove(track_id)
                     if track_id in self.candidate.tracker_queue:
                         del self.candidate.tracker_queue[track_id]
@@ -634,16 +639,24 @@ class Tracker:
             # This part assumes candidates_list is a deque of TrackInstances objects
             # and self.candidate.current_tracks contains the track_ids to look for.
             active_track_ids_in_deque = set()
-            for track_instance_container in candidates_list: # This is a Deque[TrackInstances]
+            for (
+                track_instance_container
+            ) in candidates_list:  # This is a Deque[TrackInstances]
                 for idx, track_id in enumerate(track_instance_container.track_ids):
                     if track_id in self.candidate.current_tracks:
                         tracked_instance_feature = TrackedInstanceFeature(
                             feature=track_instance_container.features[idx],
-                            src_predicted_instance=track_instance_container.src_instances[idx],
+                            src_predicted_instance=track_instance_container.src_instances[
+                                idx
+                            ],
                             frame_idx=track_instance_container.frame_idx,
-                            tracking_score=track_instance_container.tracking_scores[idx],
-                            instance_score=track_instance_container.instance_scores[idx],
-                            shifted_keypoints=None, # This is not FlowShiftTracker
+                            tracking_score=track_instance_container.tracking_scores[
+                                idx
+                            ],
+                            instance_score=track_instance_container.instance_scores[
+                                idx
+                            ],
+                            shifted_keypoints=None,  # This is not FlowShiftTracker
                         )
                         candidates_feature_dict.append(tracked_instance_feature)
                         active_track_ids_in_deque.add(track_id)
@@ -801,23 +814,27 @@ class Tracker:
             return self.candidate.add_new_tracks(
                 current_instances, existing_track_ids=list(self._track_objects.keys())
             )
-            
+
         costs_array = np.array([cost_matrix[tid] for tid in valid_track_ids])
 
         # Use Hungarian algorithm to find optimal matching if there are valid tracks
-        if costs_array.ndim == 1: # Handle case where there's only one valid track_id with costs
+        if (
+            costs_array.ndim == 1
+        ):  # Handle case where there's only one valid track_id with costs
             costs_array = costs_array.reshape(1, -1)
-            
+
         if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
             row_ind, col_ind = matching_method(costs_array)
 
             for row, col in zip(row_ind, col_ind):
                 score = -costs_array[row, col]  # Convert cost back to score
-                if (
-                    score > -1e10 and (self.max_cost is None or score < self.max_cost)
+                if score > -1e10 and (
+                    self.max_cost is None or score < self.max_cost
                 ):  # Only assign track if score is below threshold or no threshold
                     tracking_scores.append(score)
-                    matched_track_ids.append(valid_track_ids[row]) # Use valid_track_ids here
+                    matched_track_ids.append(
+                        valid_track_ids[row]
+                    )  # Use valid_track_ids here
                     matched_instance_indices.append(col)
 
         # Update tracker queue and assign track IDs
@@ -832,15 +849,15 @@ class Tracker:
 
         return current_tracked_instances
 
-    def train_hmm_model(self, labels: sio.Labels, n_hmm_states: int, n_hmm_components: int):
-        """Train an identity assignment model using tracked instances.
+    def train_hmm_with_rts(self, labels, n_hmm_states):
+        """Train an HMM model with RTS smoothing for identity tracking.
 
         Args:
-            labels: Labels object containing all instances.
-            n_hmm_states: Number of states in the HMM.
-            n_hmm_components: Number of components in the HMM.
+            labels: Labels object containing all instances
+            n_hmm_states: Number of states in the HMM
+        Returns:
+            tuple: (hmm_model, feature_scaler)
         """
-
         # Group instances by global track ID
         tracked_sequences = defaultdict(list)
 
@@ -866,9 +883,8 @@ class Tracker:
         feature_scaler = StandardScaler()
         X_scaled = feature_scaler.fit_transform(X)
 
-        # Check for NaN values in scaled features
+        # Handle NaN values
         if np.isnan(X_scaled).any():
-
             valid_mask = ~np.isnan(X_scaled).any(axis=1)
             X_scaled = X_scaled[valid_mask]
 
@@ -883,11 +899,9 @@ class Tracker:
                 current_pos += length
             lengths = new_lengths
 
-        # Initialize HMM
+        # Initialize HMM with full covariance for better state estimation
         hmm_model = hmm.GaussianHMM(
-            n_components=n_hmm_states,
-            covariance_type="full",
-            random_state=42
+            n_components=n_hmm_states, covariance_type="full", random_state=42
         )
 
         # Fit HMM
@@ -895,86 +909,138 @@ class Tracker:
 
         return hmm_model, feature_scaler
 
-    def infer_and_assign_untracked_identities(
-        self, labels: sio.Labels, hmm_model, feature_scaler
-    ):
-        """Infer and assign identities to untracked instances using the trained model.
+    def apply_rts_smoothing(self, hmm_model, features_scaled):
+        """Apply RTS smoothing to HMM state sequence.
 
         Args:
-            labels: Labels object containing all instances.
+            hmm_model: Trained HMM model
+            features_scaled: Scaled feature matrix
+
+        Returns:
+            np.ndarray: Smoothed state sequence
+        """
+        # Forward pass (filtering)
+        logprob, filtered_state_probs = hmm_model.score_samples(features_scaled)
+
+        # Backward pass (smoothing)
+        smoothed_state_probs = np.zeros_like(filtered_state_probs)
+        smoothed_state_probs[-1] = filtered_state_probs[-1]
+
+        for t in range(len(features_scaled) - 2, -1, -1):
+            # Compute smoothing gain
+            transition_matrix = hmm_model.transmat_
+
+            # Compute smoothed state probabilities
+            smoothed_state_probs[t] = filtered_state_probs[t] * (
+                transition_matrix
+                @ (
+                    smoothed_state_probs[t + 1]
+                    / (transition_matrix @ filtered_state_probs[t] + 1e-10)
+                )
+            )
+
+            # Normalize
+            smoothed_state_probs[t] /= smoothed_state_probs[t].sum() + 1e-10
+
+        # Get most likely state sequence from smoothed probabilities
+        state_sequence = np.argmax(smoothed_state_probs, axis=1)
+
+        return state_sequence
+
+    def infer_identities_with_rts(
+        self, labels, hmm_model, feature_scaler
+    ):
+        """Infer and assign identities using RTS smoothing.
+
+        Args:
+            labels: Labels object containing all instances
+            hmm_model: Trained HMM model
+            feature_scaler: Fitted feature scaler
+
+        Returns:
+            dict: Mapping of tracklet IDs to assigned global track IDs
         """
         tracklets = self.group_tracklets(labels)
+        assignments = {}
 
         # Process each untracked tracklet
         for track_id, instances in tracklets.items():
             if track_id not in self.global_track_ids:
                 # Sort instances by frame index
                 instances.sort(key=lambda x: x[0])
-                # Extract just the instances after sorting by frame
                 frames = [inst[0] for inst in instances]
                 instances = [inst[1] for inst in instances]
-                
+
                 # Extract features
-                features = np.array([self.extract_pose_features(inst) for inst in instances])
-                
+                features = np.array(
+                    [self.extract_pose_features(inst) for inst in instances]
+                )
+
                 # Scale features
                 features_scaled = feature_scaler.transform(features)
-                # Check for NaN values in scaled features
+
+                # Handle NaN values
                 if np.isnan(features_scaled).any():
-                    print(f"Warning: Scaled features for track {track_id} contain NaN values")
-                    print(f"Number of NaN values: {np.isnan(features_scaled).sum()}")
-                    print(f"NaN locations: {np.where(np.isnan(features_scaled))}")
-                    # Remove rows with NaN values
-                    # Mask NaN values with the mean of each feature
+                    # Replace NaN values with column means
                     for col in range(features_scaled.shape[1]):
                         col_mask = np.isnan(features_scaled[:, col])
                         if col_mask.any():
-                            # Replace NaN with mean of non-NaN values for this feature
                             col_mean = np.nanmean(features_scaled[:, col])
                             features_scaled[col_mask, col] = col_mean
+
                     if len(features_scaled) == 0:
                         continue
-                
-                # Predict most likely state sequence
-                state_sequence = hmm_model.predict(features_scaled)
-                
-                # Get most likely global identity based on state sequence
-                # For now, we'll use a simple majority vote of states
+
+                # Apply RTS smoothing
+                state_sequence = self.apply_rts_smoothing(hmm_model, features_scaled)
+
+                # Get most likely global identity based on smoothed state sequence
                 from collections import Counter
+
                 state_counts = Counter(state_sequence)
                 most_common_state = state_counts.most_common(1)[0][0]
-                
-                # Map state to global identity (this is a simple mapping - could be improved)
+
+                # Map state to global identity
                 global_track_names = list(self.global_track_ids.keys())
-                global_track_name = global_track_names[most_common_state % len(global_track_names)]
+                global_track_name = global_track_names[
+                    most_common_state % len(global_track_names)
+                ]
                 global_track = self.global_track_ids[global_track_name]
-                
-                # Check if the proposed global track is already used in any frame of this tracklet
+
+                # Check if the proposed global track is already used
                 is_track_available = True
                 for frame, inst in zip(frames, instances):
-                    existing_instances = [i for i in labels[frame].instances if i != inst]
-                    if any(i.track == global_track for i in existing_instances):
+                    existing_instances = [
+                        i for i in labels[frame].instances if i != inst
+                    ]
+                    if any(
+                        i.track.name == global_track.name for i in existing_instances
+                    ):
                         is_track_available = False
                         break
-                
-                # If the track is not available, find the next available track
+
+                # If track is not available, find next available track
                 if not is_track_available:
                     for alternative_track_name in global_track_names:
                         alternative_track = self.global_track_ids[alternative_track_name]
-                        if all(all(i.track != alternative_track for i in labels[frame].instances if i != inst) 
-                            for frame, inst in zip(frames, instances)):
+                        if all(
+                            all(
+                                i.track != alternative_track
+                                for i in labels[frame].instances
+                                if i != inst
+                            )
+                            for frame, inst in zip(frames, instances)
+                        ):
                             global_track = alternative_track
                             global_track_name = alternative_track_name
                             break
                     else:
-                        print(f"Warning: No available global track for tracklet {track_id}")
                         continue
-                
-                # Update track references
+
                 for inst in instances:
                     inst.track = global_track
-                    
-                print(f"Assigned tracklet {track_id} to global identity {global_track_name}")
+
+        return assignments
 
     def extract_pose_features(self, instance: sio.PredictedInstance) -> np.ndarray:
         """Extract pose features from an instance for HMM input.
