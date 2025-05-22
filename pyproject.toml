@@ -22,7 +22,8 @@ dependencies = [
     "attrs",
     "sleap-io",
     "scipy",
-    "motmetrics"]
+    "motmetrics",
+    "hmmlearn"]
 dynamic = ["version", "readme"]
 
 [tool.setuptools.dynamic]
