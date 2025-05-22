@@ -1,6 +1,6 @@
 """Module for tracking."""
 
-from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional, Tuple, Tuple
+from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional
 from collections import defaultdict
 import attrs
 import cv2
@@ -38,7 +38,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 
 
 @attrs.define
