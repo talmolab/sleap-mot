@@ -73,7 +73,11 @@ def test_local_queue(centered_pair_predictions):
     for inst in tracked_instances:
         assert inst.track is not None
     assert len(tracker.candidate.tracker_queue) == 2
-    assert tracker.candidate.current_tracks == ["0", "1"]
+    assert len(tracker.candidate.current_tracks) == 2
+    assert (
+        "0" in tracker.candidate.current_tracks
+        and "1" in tracker.candidate.current_tracks
+    )
     assert (
         tracked_instances[0].track.name == "0"
         and tracked_instances[1].track.name == "1"

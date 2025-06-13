@@ -19,7 +19,7 @@ class FixedWindowCandidates:
         instance_score_threshold: Instance score threshold for creating new tracks.
             Default: 0.0.
         tracker_queue: Deque object that stores the past `window_size` tracked instances.
-        current_tracks: List of track IDs that are being tracked.
+        all_tracks: List of track IDs that are created.
     """
 
     def __init__(self, window_size: int = 5, instance_score_threshold: float = 0.0):
@@ -27,7 +27,18 @@ class FixedWindowCandidates:
         self.window_size = window_size
         self.instance_score_threshold = instance_score_threshold
         self.tracker_queue = deque(maxlen=self.window_size)
-        self.current_tracks = []
+        self.all_tracks = []
+
+    @property
+    def current_tracks(self):
+        """Get track IDs of items currently in tracker queue."""
+        if not len(self.tracker_queue):
+            return []
+        else:
+            curr_tracks = set()
+            for item in self.tracker_queue:
+                curr_tracks.update(item.track_ids)
+            return list(curr_tracks)
 
     def get_track_instances(
         self,
@@ -96,6 +107,7 @@ class FixedWindowCandidates:
                 new_track_id = str(
                     min(set(range(max(numeric_track_ids) + 2)) - set(numeric_track_ids))
                 )
+        self.all_tracks.append(new_track_id)
         return new_track_id
 
     def add_new_tracks(
@@ -154,10 +166,10 @@ class FixedWindowCandidates:
 
         """
         add_to_queue = True
-        if np.any(row_inds) or np.any(col_inds):
+        if row_inds is not None and col_inds is not None:
 
             for idx, (row, col) in enumerate(zip(row_inds, col_inds)):
-                current_instances.track_ids[row] = col
+                current_instances.track_ids[row] = self.current_tracks[col]
                 current_instances.tracking_scores[row] = tracking_scores[idx]
 
             # update tracks to queue
