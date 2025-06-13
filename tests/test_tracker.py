@@ -98,7 +98,11 @@ def test_fixed_window(centered_pair_predictions):
         track_matching_method="greedy",
     )
     tracked_instances = tracker.track_frame(pred_instances, 0)
-    assert tracker.candidate.current_tracks == ["0", "1"]
+    assert len(tracker.candidate.current_tracks) == 2
+    assert (
+        "0" in tracker.candidate.current_tracks
+        and "1" in tracker.candidate.current_tracks
+    )
     assert (
         tracked_instances[0].track.name == "track_0"
         and tracked_instances[1].track.name == "track_1"
