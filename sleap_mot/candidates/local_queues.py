@@ -102,10 +102,8 @@ class LocalQueueCandidates:
                 new_track_id = str(
                     min(set(range(max(numeric_track_ids) + 2)) - set(numeric_track_ids))
                 )
-            if (
-                self.max_tracks is not None and int(new_track_id) > self.max_tracks
-            ):  # TODO
-                raise Exception("Exceeding max tracks")
+            if self.max_tracks is not None and int(new_track_id) >= self.max_tracks:
+                return None
         self.tracker_queue[new_track_id] = deque(maxlen=self.window_size)
         return new_track_id
 
@@ -128,10 +126,13 @@ class LocalQueueCandidates:
                 else:
                     new_track_id = self.get_new_track_id(existing_track_ids)
                     existing_track_ids.append(new_track_id)
-                t.track_id = new_track_id
-                t.tracking_score = 1.0
-                self.current_tracks.append(new_track_id)
-                self.tracker_queue[new_track_id].append(t)
+                if new_track_id is not None:
+                    t.track_id = new_track_id
+                    t.tracking_score = 1.0
+                    self.current_tracks.append(new_track_id)
+                    self.tracker_queue[new_track_id].append(t)
+                else:
+                    continue
             track_instances.append(t)
 
         return track_instances
@@ -171,10 +172,13 @@ class LocalQueueCandidates:
         for idx in unmatched_indices:
             if current_instances[idx].instance_score > self.instance_score_threshold:
                 new_track_id = self.get_new_track_id(existing_track_ids)
-                existing_track_ids.append(new_track_id)
-                current_instances[idx].track_id = new_track_id
-                current_instances[idx].tracking_score = 1.0
-                self.current_tracks.append(new_track_id)
+                if new_track_id is not None:
+                    existing_track_ids.append(new_track_id)
+                    current_instances[idx].track_id = new_track_id
+                    current_instances[idx].tracking_score = 1.0
+                    self.current_tracks.append(new_track_id)
+                else:
+                    continue
 
         if add_to_queue:
             # Track which track_ids get updated
@@ -201,7 +205,7 @@ class LocalQueueCandidates:
                     )
                     self.tracker_queue[track_id].append(empty_instance)
 
-        return current_instances
+        return [x for x in current_instances if x.track_id is not None]
 
     def get_instances_groupby_frame_idx(
         self, candidates_list: Optional[DefaultDict[int, Deque]]
