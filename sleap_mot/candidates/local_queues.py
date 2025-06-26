@@ -102,10 +102,10 @@ class LocalQueueCandidates:
                 new_track_id = str(
                     min(set(range(max(numeric_track_ids) + 2)) - set(numeric_track_ids))
                 )
-            if (
-                self.max_tracks is not None and int(new_track_id) > self.max_tracks
-            ):  # TODO
-                raise Exception("Exceeding max tracks")
+            # if (
+            #     self.max_tracks is not None and int(new_track_id) > self.max_tracks
+            # ):  # TODO
+            #     raise Exception("Exceeding max tracks")
         self.tracker_queue[new_track_id] = deque(maxlen=self.window_size)
         return new_track_id
 
@@ -142,6 +142,7 @@ class LocalQueueCandidates:
         row_inds: np.ndarray,
         col_inds: np.ndarray,
         tracking_scores: List[float],
+        generate_new_tracks: bool = False,
         add_to_queue: bool = False,
         existing_track_ids: List[str] = [],
     ) -> List[TrackInstanceLocalQueue]:
@@ -188,7 +189,7 @@ class LocalQueueCandidates:
 
             # Add empty instances for tracks that weren't updated
             for track_id in self.current_tracks:
-                if track_id not in updated_track_ids:
+                if track_id not in updated_track_ids and generate_new_tracks:
                     empty_instance = TrackInstanceLocalQueue(
                         src_instance=None,
                         src_instance_idx=None,

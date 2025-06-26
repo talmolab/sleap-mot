@@ -1,16 +1,14 @@
 """Module for tracking."""
 
-from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional
+from typing import Any, Dict, List, Union, Deque, DefaultDict, Optional, Tuple
 from collections import defaultdict
 import attrs
 import cv2
 import numpy as np
 from collections import deque
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 import logging
-from sklearn.preprocessing import StandardScaler
-from hmmlearn import hmm
+import imageio.v3 as iio
 
 import sleap_io as sio
 from sleap_mot.candidates.fixed_window import FixedWindowCandidates
@@ -30,6 +28,12 @@ from sleap_mot.utils import (
     compute_iou,
     compute_cosine_sim,
     compute_oks,
+    get_next_instance,
+    get_bbox_pixel_intensities,
+    get_pos,
+    is_track_available,
+    calc_seq_cost,
+    combine_cost_dicts,
 )
 import logging
 
@@ -37,7 +41,6 @@ logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-from tqdm import tqdm
 
 
 @attrs.define
@@ -234,12 +237,13 @@ class Tracker:
             frame_idx (int): Current frame index
             labels (Labels): Labels object containing tracked instances
         """
+
         if tracklet_id.name not in self.global_track_ids:
             if tracklet_id.name in self.candidate.current_tracks:
                 self.candidate.current_tracks.remove(tracklet_id.name)
             if global_track_id.name not in self.candidate.current_tracks:
                 self.candidate.current_tracks.append(global_track_id.name)
-            # self._track_objects.pop(tracklet_id.name)
+            self._track_objects.pop(tracklet_id.name)
             self._track_objects[global_track_id.name] = global_track_id
 
             self.candidate.tracker_queue[global_track_id.name] = (
@@ -249,12 +253,22 @@ class Tracker:
                 val.track_id = global_track_id.name
 
         else:
-            for lf in labels[frame_idx - self.candidate.window_size : frame_idx + 1]:
+            # for lf in labels[frame_idx - self.candidate.window_size : frame_idx + 1]:
+            frames_to_process = labels[
+                frame_idx - self.candidate.window_size : frame_idx + 1
+            ]
+
+            for lf in frames_to_process:
+                instances = [inst for inst in lf.instances]
+                features = self.get_features(instances, frame_idx)  # , lf.image)
+
                 updated_track_ids = set()
-                for inst in lf.instances:
-                    self.candidate.tracker_queue[inst.track.name].append(
-                        self.get_features([inst], lf.frame_idx, lf.image)[0]
-                    )
+                for inst, feature in zip(instances, features):
+                    if inst.track.name not in self.candidate.tracker_queue:
+                        self.candidate.tracker_queue[inst.track.name] = deque(
+                            maxlen=self.candidate.window_size
+                        )
+                    self.candidate.tracker_queue[inst.track.name].append(feature)
                     updated_track_ids.add(inst.track.name)
 
                 for track_id in self.candidate.current_tracks:
@@ -267,9 +281,21 @@ class Tracker:
                             track_id=track_id,
                             tracking_score=0.0,
                             frame_idx=lf.frame_idx,
-                            image=lf.image,
+                            # image=lf.image,
                         )
                         self.candidate.tracker_queue[track_id].append(empty_instance)
+
+        try:
+            if any(self._track_objects[key].name != key for key in self._track_objects):
+                print("track object name does not match queue key")
+                print(frame_idx)
+            if any(v.maxlen != 5 for v in self.candidate.tracker_queue.values()):
+                print(frame_idx)
+        except:
+            print(frame_idx)
+            raise ValueError("Queue maxlen is not 5")
+
+        # logger.debug(f"Current queue sizes: {[(k, len(v)) for k, v in self.candidate.tracker_queue.items()]}")
 
     def get_tracklet(self, matching_instance, global_track_id, labels, frame_idx):
         """Get the tracklet (sequence of instances) associated with a given instance.
@@ -295,7 +321,7 @@ class Tracker:
             tracklet_id = matching_instance.track
             before_frames = [
                 labels.find(frame_idx=frame, video=labels.video, return_new=True)[0]
-                for frame in range(frame_idx - 1, max(frame_idx - 300, -1), -1)
+                for frame in range(frame_idx - 1, max(frame_idx - 30, -1), -1)
             ]
 
             tracklet = [matching_instance]
@@ -346,6 +372,13 @@ class Tracker:
             if matching_instance.track.name == global_track_name:
                 continue
 
+            if matching_instance.track.name != global_track_name:
+                for curr in new_instances:
+                    if curr.track.name == global_track_name:
+                        curr.track = matching_instance.track
+                        matching_instance.track = self._track_objects[global_track_name]
+                        break
+
             tracklet_id = matching_instance.track
             tracklet = self.get_tracklet(
                 matching_instance, global_track_id, labels, frame_idx
@@ -361,30 +394,7 @@ class Tracker:
 
         return new_instances
 
-    def track(
-        self,
-        labels: sio.Labels,
-        max_dist: int = None,
-        inplace: bool = False,
-        n_hmm_states: int = None,
-    ):
-        """Track instances across frames.
-
-        This method tracks instances across frames in the provided `sio.Labels` object.
-        It supports single-video labels and allows for in-place updates of the labels.
-
-        Args:
-            labels (sio.Labels): The labeled frames to track.
-            inplace (bool): If True, the labels are updated in place. Default: False.
-
-        Returns:
-            sio.Labels: The updated labeled frames with track IDs assigned.
-        """
-        if len(labels.videos) > 1:
-            raise NotImplementedError("Multiple videos are not supported.")
-
-        can_load_images = labels.video.exists()
-
+    def sort_labels(self, labels):
         n_frames = labels.video.shape[0]
         sorted_labels = []
         for frame_idx in range(n_frames):
@@ -419,11 +429,40 @@ class Tracker:
                 found_label[0].instances.append(inst)
 
             sorted_labels.append(found_label[0])
+
+        return sorted_labels
+
+    def track(
+        self,
+        labels: sio.Labels,
+        max_dist: int = None,
+        generate_new_tracks: bool = False,
+    ):
+        """Track instances across frames.
+
+        This method tracks instances across frames in the provided `sio.Labels` object.
+        It supports single-video labels and allows for in-place updates of the labels.
+
+        Args:
+            labels (sio.Labels): The labeled frames to track.
+            generate_new_tracks (bool): If True, new tracks are generated for each frame. Recommended for videos that are challenging to track Default: False.
+
+        Returns:
+            sio.Labels: The updated labeled frames with track IDs assigned.
+        """
+        if len(labels.videos) > 1:
+            raise NotImplementedError("Multiple videos are not supported.")
+
+        can_load_images = labels.video.exists()
+
+        sorted_labels = self.sort_labels(labels)
         labels.labeled_frames = sorted_labels
 
         self.global_track_ids = {t.name: t for t in labels.tracks}
 
-        for lf in tqdm(labels):
+        for lf in labels:
+            if any(self._track_objects[key].name != key for key in self._track_objects):
+                print(lf.frame_idx)
             if lf.instances:
                 tracked_instances = [
                     (inst.numpy(), inst.track.name)
@@ -434,7 +473,8 @@ class Tracker:
                 self.track_frame(
                     lf.instances,
                     lf.frame_idx,
-                    lf.image,
+                    generate_new_tracks=generate_new_tracks,
+                    # lf.image,
                     max_dist=max_dist,
                     add_to_queue=True,
                 )
@@ -446,9 +486,22 @@ class Tracker:
                         lf.frame_idx,
                     )
 
-        if n_hmm_states:
-            hmm_model, feature_scaler = self.train_hmm_with_rts(labels, n_hmm_states)
-            self.infer_identities_with_rts(labels, hmm_model, feature_scaler)
+        if generate_new_tracks:
+            grid_size = (15, 15)
+            transition_matrices = self.build_transition_matrices(labels, grid_size)
+            averaged_visual_features = self.extract_visual_features(
+                labels, patch_dimension=50
+            )
+
+            self.assign_tracklets_to_global_tracks(
+                labels,
+                transition_matrices,
+                averaged_visual_features,
+                grid_size,
+                alpha=0.3,
+                beta=0.7,
+                patch_dimension=50,
+            )
 
         labels.update()
 
@@ -489,6 +542,7 @@ class Tracker:
         self,
         instances: List[sio.PredictedInstance],
         frame_idx: int,
+        generate_new_tracks: bool = False,
         image: np.ndarray = None,
         max_dist: int = None,
         add_to_queue: bool = False,
@@ -509,20 +563,21 @@ class Tracker:
         Returns:
             List[sio.PredictedInstance]: The list of instances with assigned track IDs.
         """
+
         current_instances = self.get_features(instances, frame_idx, image)
 
-        candidates_feature_dict = self.generate_candidates()
+        candidates_feature_dict = self.generate_candidates(generate_new_tracks)
 
         if candidates_feature_dict:
             scores = self.get_scores(
                 current_instances, candidates_feature_dict, max_dist
             )
+
             cost_matrix = self.scores_to_cost_matrix(scores)
 
             current_tracked_instances = self.assign_tracks(
-                current_instances, cost_matrix, add_to_queue
+                current_instances, cost_matrix, add_to_queue, generate_new_tracks
             )
-
         else:
             current_tracked_instances = self.candidate.add_new_tracks(
                 current_instances, existing_track_ids=list(self._track_objects.keys())
@@ -550,7 +605,6 @@ class Tracker:
                     instance.src_instance.track = self._track_objects[instance.track_id]
                     instance.src_instance.tracking_score = instance.tracking_score
                 new_pred_instances.append(instance.src_instance)
-
         else:
             new_pred_instances = []
             for idx, inst in enumerate(current_tracked_instances.src_instances):
@@ -600,11 +654,15 @@ class Tracker:
 
         return current_instances
 
-    def generate_candidates(self):
+    def generate_candidates(self, generate_new_tracks: bool = False):
         """Get the tracked instances from tracker queue."""
-        return self.update_candidates(self.candidate.tracker_queue)
+        return self.update_candidates(self.candidate.tracker_queue, generate_new_tracks)
 
-    def update_candidates(self, candidates_list: Union[Deque, DefaultDict[int, Deque]]):
+    def update_candidates(
+        self,
+        candidates_list: Union[Deque, DefaultDict[int, Deque]],
+        generate_new_tracks: bool = False,
+    ):
         """Return dictionary with the features of tracked instances.
 
         Args:
@@ -622,7 +680,10 @@ class Tracker:
                 track_features = self.candidate.get_features_from_track_id(
                     track_id, candidates_list
                 )
-                if all(x.feature is None for x in track_features):
+                if (
+                    all(x.feature is None for x in track_features)
+                    and generate_new_tracks
+                ):
                     if (
                         track_id in self.candidate.current_tracks
                     ):  # Check if still present before removing
@@ -684,6 +745,7 @@ class Tracker:
         Returns:
             scores: Score matrix of shape (num_new_instances, num_existing_tracks)
         """
+
         if self.scoring_method not in self._scoring_functions:
             raise ValueError(
                 "Invalid `scoring_method` argument. Please provide one of `oks`, `cosine_sim`, `iou`, and `euclidean_dist`."
@@ -761,6 +823,7 @@ class Tracker:
                     scores[track_id][f_idx] = oks
                 else:
                     scores[track_id][f_idx] = -1e10
+
         return scores
 
     def scores_to_cost_matrix(self, scores: np.ndarray):
@@ -777,6 +840,7 @@ class Tracker:
         current_instances: Union[TrackInstances, List[TrackInstanceLocalQueue]],
         cost_matrix: np.ndarray,
         add_to_queue: bool = False,
+        generate_new_tracks: bool = False,
     ) -> Union[TrackInstances, List[TrackInstanceLocalQueue]]:
         """Assign track IDs using Hungarian method.
 
@@ -842,258 +906,341 @@ class Tracker:
             matched_instance_indices,
             matched_track_ids,
             tracking_scores,
-            add_to_queue,
+            add_to_queue=add_to_queue,
+            generate_new_tracks=generate_new_tracks,
             existing_track_ids=list(self._track_objects.keys()),
         )
 
         return current_tracked_instances
 
-    def train_hmm_with_rts(self, labels, n_hmm_states):
-        """Train an HMM model with RTS smoothing for identity tracking.
+    def build_transition_matrices(
+        self, labels: sio.Labels, grid_size: Tuple[int, int]
+    ) -> Dict:
+        """Build transition probability matrices for tracked instances.
 
         Args:
-            labels: Labels object containing all instances
-            n_hmm_states: Number of states in the HMM
+            labels: Labels object
+            grid_size: Grid dimensions
+
         Returns:
-            tuple: (hmm_model, feature_scaler)
+            Dict: Dictionary containing transition matrices for forward and backward directions
         """
-        # Group instances by global track ID
+
+        arena_width, arena_height = labels.video.shape[2], labels.video.shape[1]
+
+        transitions = defaultdict(lambda: np.zeros(grid_size))
+        reverse_transitions = defaultdict(lambda: np.zeros(grid_size))
+        transition_matrices = {1: transitions, -1: reverse_transitions}
+        prev_instances = {}
+
+        for lf in labels:
+            for inst in lf:
+                if inst.track.name in self.global_track_ids:
+                    i_curr, j_curr = get_pos(inst, grid_size, arena_width, arena_height)
+                    if inst.track.name in prev_instances:
+                        prev_centroid = prev_instances[inst.track.name]
+                        i_prev, j_prev = prev_centroid[0], prev_centroid[1]
+                        transitions[(i_prev, j_prev)][i_curr, j_curr] += 1
+                        reverse_transitions[(i_curr, j_curr)][i_prev, j_prev] += 1
+                    prev_instances[inst.track.name] = [i_curr, j_curr]
+
+        # Normalize transition matrices
+        for key in transitions:
+            heatmap = transitions[key]
+            total = heatmap.sum()
+            if total > 0:
+                transitions[key] = heatmap / total
+
+        for key in reverse_transitions:
+            heatmap = reverse_transitions[key]
+            total = heatmap.sum()
+            if total > 0:
+                reverse_transitions[key] = heatmap / total
+
+        return transition_matrices
+
+    def extract_visual_features(
+        self, labels: sio.Labels, patch_dimension: int = 50
+    ) -> Dict[str, np.ndarray]:
+        """Extract and average visual features for each global track.
+
+        Args:
+            labels: Labels object
+            patch_dimension: Size of image patches to extract
+
+        Returns:
+            Dict: Dictionary mapping track names to averaged visual features
+        """
+
+        def full_pose_available(inst: sio.PredictedInstance) -> bool:
+            """Check if all keypoints in an instance are available (not NaN).
+
+            Args:
+                inst: Instance to check
+
+            Returns:
+                bool: True if all keypoints are available, False otherwise
+            """
+            for point in inst.points.values():
+                if np.isnan(point.x) or np.isnan(point.y):
+                    return False
+            return True
+
+        reader = iio.imiter(labels.video.filename)
         tracked_sequences = defaultdict(list)
 
-        # Extract features for each tracked instance
         for lf in labels:
+            image = next(reader)
             for inst in lf.instances:
-                if inst.track is not None and inst.track.name in self.global_track_ids:
-                    features = self.extract_pose_features(inst)
-                    tracked_sequences[inst.track.name].append(features)
+                if inst.track.name in self.global_track_ids and full_pose_available(
+                    inst
+                ):
+                    visual_features = get_bbox_pixel_intensities(
+                        inst, image, patch_dimension
+                    )
+                    tracked_sequences[inst.track.name].append(visual_features)
 
-        # Convert sequences to numpy arrays
-        sequences = []
-        lengths = []
-        for track_id, seq in tracked_sequences.items():
+        # Average features across all frames for each track
+        averaged_tracked_sequences = {}
+        for global_track, seq in tracked_sequences.items():
             if len(seq) > 0:
-                sequences.append(np.array(seq))
-                lengths.append(len(seq))
+                avg_array = np.mean(np.stack(seq, axis=0), axis=0)
+                averaged_tracked_sequences[global_track] = avg_array
 
-        # Concatenate all sequences
-        X = np.vstack(sequences)
+        return averaged_tracked_sequences
 
-        # Initialize and fit scaler
-        feature_scaler = StandardScaler()
-        X_scaled = feature_scaler.fit_transform(X)
-
-        # Handle NaN values
-        if np.isnan(X_scaled).any():
-            valid_mask = ~np.isnan(X_scaled).any(axis=1)
-            X_scaled = X_scaled[valid_mask]
-
-            # Update lengths to match filtered data
-            new_lengths = []
-            current_pos = 0
-            for length in lengths:
-                original_segment = valid_mask[current_pos : current_pos + length]
-                new_segment_length = original_segment.sum()
-                if new_segment_length > 0:
-                    new_lengths.append(new_segment_length)
-                current_pos += length
-            lengths = new_lengths
-
-        # Initialize HMM with full covariance for better state estimation
-        hmm_model = hmm.GaussianHMM(
-            n_components=n_hmm_states, covariance_type="full", random_state=42
-        )
-
-        # Fit HMM
-        hmm_model.fit(X_scaled, lengths=lengths)
-
-        return hmm_model, feature_scaler
-
-    def apply_rts_smoothing(self, hmm_model, features_scaled):
-        """Apply RTS smoothing to HMM state sequence.
+    def calculate_tracklet_costs(
+        self,
+        tracklet: List[Tuple[int, sio.PredictedInstance]],
+        labels: sio.Labels,
+        transition_matrices: Dict,
+        averaged_visual_features: Dict[str, np.ndarray],
+        grid_size: Tuple[int, int],
+        patch_dimension: int = 50,
+    ) -> Tuple[Dict, Dict]:
+        """Calculate positional and visual costs for assigning a tracklet to each global track.
 
         Args:
-            hmm_model: Trained HMM model
-            features_scaled: Scaled feature matrix
+            tracklet: List of (frame_idx, instance) tuples
+            labels: Labels object
+            transition_matrices: Dictionary of transition matrices
+            averaged_visual_features: Dictionary of averaged visual features
+            grid_size: Grid dimensions
+            patch_dimension: Size of image patches
 
         Returns:
-            np.ndarray: Smoothed state sequence
+            Tuple of (positional_costs, visual_costs) dictionaries
         """
-        # Forward pass (filtering)
-        logprob, filtered_state_probs = hmm_model.score_samples(features_scaled)
+        arena_width, arena_height = labels.video.shape[2], labels.video.shape[1]
+        curr_frames = [inst[0] for inst in tracklet]
+        curr_instances = [inst[1] for inst in tracklet]
+        first_frame_idx = curr_frames[0]
+        last_frame_idx = curr_frames[-1]
 
-        # Backward pass (smoothing)
-        smoothed_state_probs = np.zeros_like(filtered_state_probs)
-        smoothed_state_probs[-1] = filtered_state_probs[-1]
+        cost_dict_pos = {}
+        cost_dict_vis = {}
 
-        for t in range(len(features_scaled) - 2, -1, -1):
-            # Compute smoothing gain
-            transition_matrix = hmm_model.transmat_
-
-            # Compute smoothed state probabilities
-            smoothed_state_probs[t] = filtered_state_probs[t] * (
-                transition_matrix
-                @ (
-                    smoothed_state_probs[t + 1]
-                    / (transition_matrix @ filtered_state_probs[t] + 1e-10)
-                )
-            )
-
-            # Normalize
-            smoothed_state_probs[t] /= smoothed_state_probs[t].sum() + 1e-10
-
-        # Get most likely state sequence from smoothed probabilities
-        state_sequence = np.argmax(smoothed_state_probs, axis=1)
-
-        return state_sequence
-
-    def infer_identities_with_rts(self, labels, hmm_model, feature_scaler):
-        """Infer and assign identities using RTS smoothing.
-
-        Args:
-            labels: Labels object containing all instances
-            hmm_model: Trained HMM model
-            feature_scaler: Fitted feature scaler
-
-        Returns:
-            dict: Mapping of tracklet IDs to assigned global track IDs
-        """
-        tracklets = self.group_tracklets(labels)
-        assignments = {}
-
-        # Process each untracked tracklet
-        for track_id, instances in tracklets.items():
-            if track_id not in self.global_track_ids:
-                # Sort instances by frame index
-                instances.sort(key=lambda x: x[0])
-                frames = [inst[0] for inst in instances]
-                instances = [inst[1] for inst in instances]
-
-                # Extract features
-                features = np.array(
-                    [self.extract_pose_features(inst) for inst in instances]
-                )
-
-                # Scale features
-                features_scaled = feature_scaler.transform(features)
-
-                # Handle NaN values
-                if np.isnan(features_scaled).any():
-                    # Replace NaN values with column means
-                    for col in range(features_scaled.shape[1]):
-                        col_mask = np.isnan(features_scaled[:, col])
-                        if col_mask.any():
-                            col_mean = np.nanmean(features_scaled[:, col])
-                            features_scaled[col_mask, col] = col_mean
-
-                    if len(features_scaled) == 0:
-                        continue
-
-                # Apply RTS smoothing
-                state_sequence = self.apply_rts_smoothing(hmm_model, features_scaled)
-
-                # Get most likely global identity based on smoothed state sequence
-                from collections import Counter
-
-                state_counts = Counter(state_sequence)
-                most_common_state = state_counts.most_common(1)[0][0]
-
-                # Map state to global identity
-                global_track_names = list(self.global_track_ids.keys())
-                global_track_name = global_track_names[
-                    most_common_state % len(global_track_names)
-                ]
-                global_track = self.global_track_ids[global_track_name]
-
-                # Check if the proposed global track is already used
-                is_track_available = True
-                for frame, inst in zip(frames, instances):
-                    existing_instances = [
-                        i for i in labels[frame].instances if i != inst
-                    ]
-                    if any(
-                        i.track.name == global_track.name for i in existing_instances
-                    ):
-                        is_track_available = False
-                        break
-
-                # If track is not available, find next available track
-                if not is_track_available:
-                    for alternative_track_name in global_track_names:
-                        alternative_track = self.global_track_ids[
-                            alternative_track_name
-                        ]
-                        if all(
-                            all(
-                                i.track != alternative_track
-                                for i in labels[frame].instances
-                                if i != inst
-                            )
-                            for frame, inst in zip(frames, instances)
-                        ):
-                            global_track = alternative_track
-                            global_track_name = alternative_track_name
-                            break
-                    else:
-                        continue
-
-                for inst in instances:
-                    inst.track = global_track
-
-        return assignments
-
-    def extract_pose_features(self, instance: sio.PredictedInstance) -> np.ndarray:
-        """Extract pose features from an instance for HMM input.
-
-        Args:
-            instance: The instance to extract features from.
-
-        Returns:
-            np.ndarray: Flattened feature vector containing:
-                - Centroid coordinates (x, y)
-                - Keypoint coordinates (x, y for each keypoint)
-                - Bounding box coordinates (x1, y1, x2, y2)
-        """
-        # Get centroid
-        centroid = get_centroid(instance)
-
-        # Get keypoints
-        keypoints = get_keypoints(instance)
-        # Replace NaN values with mean of non-NaN values
-        keypoints = np.where(np.isnan(keypoints), np.nanmean(keypoints), keypoints)
-
-        # Get bounding box
-        bbox = get_bbox(instance)
-
-        # Concatenate all features
-        features = np.concatenate(
+        # Extract visual features for current tracklet
+        images = [labels.video[frame] for frame in curr_frames]
+        visual_features = np.array(
             [
-                centroid,  # [x, y]
-                keypoints.flatten(),  # [x1, y1, x2, y2, ...]
-                bbox,  # [x1, y1, x2, y2]
+                get_bbox_pixel_intensities(inst, image, patch_dimension)
+                for inst, image in zip(curr_instances, images)
             ]
         )
 
-        return features
+        for global_track in self.global_track_ids:
+            if is_track_available(curr_frames, curr_instances, global_track, labels):
+                prev_inst, prev_frame, prev_direction = get_next_instance(
+                    labels, first_frame_idx, global_track, -1
+                )
+                seq_inst, seq_frame, seq_direction = get_next_instance(
+                    labels, last_frame_idx, global_track, 1
+                )
 
-    def group_tracklets(
-        self, labels: sio.Labels
-    ) -> Dict[str, List[sio.PredictedInstance]]:
-        """Group instances into tracklets based on their track IDs.
+                if len(curr_instances) < 2:
+                    prev_dist = (
+                        first_frame_idx - prev_frame
+                        if prev_frame is not None
+                        else float("inf")
+                    )
+                    seq_dist = (
+                        seq_frame - last_frame_idx
+                        if seq_frame is not None
+                        else float("inf")
+                    )
+
+                    if prev_dist > seq_dist:
+                        prev_inst, prev_frame = seq_inst, seq_frame
+                        prev_direction = 1
+                    else:
+                        seq_inst, seq_frame = prev_inst, prev_frame
+                        seq_direction = -1
+
+                if prev_frame is None:
+                    prev_inst = seq_inst
+                    prev_frame = seq_frame
+                    prev_direction = 1
+
+                if seq_frame is None:
+                    seq_inst = prev_inst
+                    seq_frame = prev_frame
+                    seq_direction = -1
+
+                if prev_direction == seq_direction:
+                    cost = calc_seq_cost(
+                        prev_inst,
+                        tracklet,
+                        prev_direction,
+                        transition_matrices[prev_direction],
+                        grid_size,
+                        arena_width,
+                        arena_height,
+                    )
+
+                    # Create weighting vector that emphasizes ends of tracklet
+                    # weights = np.ones(len(tracklet))
+                    # for i in range(len(tracklet)):
+                    #     if prev_direction > 0:
+                    #         dist_from_end = (len(tracklet) - i - 1) / len(tracklet)
+                    #     else:
+                    #         dist_from_end = i / len(tracklet)
+                    #     weights[i] = 1.0 - (dist_from_end * 0.8)
+                else:
+                    # Split tracklet into two halves
+                    mid_idx = len(tracklet) // 2
+                    first_half = tracklet[:mid_idx]
+                    second_half = tracklet[mid_idx:]
+
+                    first_cost = calc_seq_cost(
+                        prev_inst,
+                        first_half,
+                        prev_direction,
+                        transition_matrices[prev_direction],
+                        grid_size,
+                        arena_width,
+                        arena_height,
+                    )
+                    second_cost = calc_seq_cost(
+                        seq_inst,
+                        second_half,
+                        seq_direction,
+                        transition_matrices[seq_direction],
+                        grid_size,
+                        arena_width,
+                        arena_height,
+                    )
+
+                    cost = np.mean([first_cost, second_cost])
+                    # np.concatenate([first_cost, second_cost])
+
+                    # Create weighting vector that emphasizes ends of tracklet
+                    # weights = np.ones(len(tracklet))
+                    # mid_point = len(tracklet) // 2
+                    # for i in range(len(tracklet)):
+                    #     end_weight = 1.8
+                    #     mid_weight = 0.4
+                    #     dist_from_mid = abs(i - mid_point) / mid_point
+                    #     weights[i] = mid_weight + (
+                    #         dist_from_mid * (end_weight - mid_weight)
+                    #     )
+
+                # Apply weights and calculate final positional cost
+                # cost_dist = cost * weights
+                # cost_dist = np.mean(cost_dist) * 0.5
+                cost_dist = cost
+
+                # Calculate visual cost
+                if global_track in averaged_visual_features:
+                    global_image = averaged_visual_features[global_track]
+                    flat_global = global_image.flatten()
+                    cost_array = []
+                    for curr_feature in visual_features:
+                        flat_curr = curr_feature.flatten()
+                        cost = 1 - np.dot(flat_curr, flat_global) / (
+                            np.linalg.norm(flat_curr) * np.linalg.norm(flat_global)
+                        )
+                        cost_array.append(cost)
+                    cost_vis = np.mean(cost_array) * 0.5
+                else:
+                    cost_vis = float("inf")
+            else:
+                cost_dist = float("inf")
+                cost_vis = float("inf")
+
+            cost_dict_pos[global_track] = cost_dist
+            cost_dict_vis[global_track] = cost_vis
+
+        return cost_dict_pos, cost_dict_vis
+
+    def assign_tracklets_to_global_tracks(
+        self,
+        labels: sio.Labels,
+        transition_matrices: Dict,
+        averaged_visual_features: Dict[str, np.ndarray],
+        grid_size: Tuple[int, int],
+        alpha: float = 0.3,
+        beta: float = 0.7,
+        patch_dimension: int = 50,
+    ) -> None:
+        """Assign untracked tracklets to global track IDs.
 
         Args:
-            labels: Labels object containing all instances.
-
-        Returns:
-            Dict mapping track IDs to lists of instances in that tracklet.
+            labels: Labels object
+            transition_matrices: Dictionary of transition matrices
+            averaged_visual_features: Dictionary of averaged visual features
+            grid_size: Grid dimensions
+            alpha: Weight for positional costs
+            beta: Weight for visual costs
+            patch_dimension: Size of image patches
         """
-        tracklets = defaultdict(list)
 
-        for frame_idx, lf in enumerate(labels):
-            for inst in lf.instances:
-                if inst.track is not None:
-                    tracklets[inst.track.name].append((frame_idx, inst))
+        def group_tracklets(
+            labels: sio.Labels,
+        ) -> Dict[str, List[Tuple[int, sio.PredictedInstance]]]:
+            """Group instances into tracklets based on their track IDs.
 
-        return tracklets
+            Args:
+                labels: Labels object containing all instances.
+
+            Returns:
+                Dict mapping track IDs to lists of (frame_idx, instance) tuples.
+            """
+            tracklets = defaultdict(list)
+
+            for frame_idx, lf in enumerate(labels):
+                for inst in lf.instances:
+                    if inst.track is not None:
+                        tracklets[inst.track.name].append((frame_idx, inst))
+
+            return tracklets
+
+        arena_width, arena_height = labels.video.shape[2], labels.video.shape[1]
+        tracklets = group_tracklets(labels)
+
+        for track_id, instances in tracklets.items():
+            if track_id not in self.global_track_ids:
+                cost_dict_pos, cost_dict_vis = self.calculate_tracklet_costs(
+                    instances,
+                    labels,
+                    transition_matrices,
+                    averaged_visual_features,
+                    grid_size,
+                    patch_dimension,
+                )
+
+                print(cost_dict_pos)
+                print(cost_dict_vis)
+
+                cost_dict = combine_cost_dicts(
+                    cost_dict_pos, cost_dict_vis, alpha, beta
+                )
+                track_to_assign = min(cost_dict.items(), key=lambda x: x[1])[0]
+
+                print(f"tracklet {track_id} given ID {track_to_assign}")
+
+                for frame, inst in instances:
+                    inst.track = self.global_track_ids[track_to_assign]
 
 
 @attrs.define
