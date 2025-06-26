@@ -154,6 +154,7 @@ class LocalQueueCandidates:
                 track.
             col_inds: List of track IDs that have been assigned a new instance.
             tracking_scores: List of tracking scores from the cost matrix.
+            generate_new_tracks: Boolean to generate new tracks for unmatched instances.
             add_to_queue: Boolean to add the `current_instances` to the tracker queue.
             existing_track_ids: List of existing track IDs.
         """

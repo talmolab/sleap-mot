@@ -239,6 +239,7 @@ def compute_cosine_sim(a, b):
 
 
 def get_pos(inst, grid_size, arena_width, arena_height):
+    """Get the position of the instance in the grid."""
     centroid = get_centroid(inst)
     i = int(centroid[0] / arena_width * grid_size[0])
     j = int(centroid[1] / arena_height * grid_size[1])
@@ -362,6 +363,20 @@ def is_track_available(
 
 
 def get_next_instance(labels, frame_idx, track_name, direction):
+    """Get the next instance with matching track name in the specified direction.
+
+    Args:
+        labels (Labels): Labels object containing video frames and instances
+        frame_idx (int): Current frame index
+        track_name (str): Track name to search for
+        direction (int): Direction to search (1 for forward, -1 for backward)
+
+    Returns:
+        tuple: (instance, frame_idx, direction) if found, (None, None, None) if not found
+            instance (PredictedInstance): Next instance with matching track name
+            frame_idx (int): Frame index where instance was found
+            direction (int): Search direction used
+    """
     next_frame = frame_idx + direction
     while next_frame >= 0 and next_frame < labels.video.shape[0]:
         frame = labels.find(frame_idx=next_frame, video=labels.video, return_new=True)[

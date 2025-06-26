@@ -237,7 +237,6 @@ class Tracker:
             frame_idx (int): Current frame index
             labels (Labels): Labels object containing tracked instances
         """
-
         if tracklet_id.name not in self.global_track_ids:
             if tracklet_id.name in self.candidate.current_tracks:
                 self.candidate.current_tracks.remove(tracklet_id.name)
@@ -395,6 +394,14 @@ class Tracker:
         return new_instances
 
     def sort_labels(self, labels):
+        """Sort labels by frame index.
+
+        Args:
+            labels (Labels): Labels object containing all tracked instances
+
+        Returns:
+            sio.Labels: Labels object with frames sorted by frame index
+        """
         n_frames = labels.video.shape[0]
         sorted_labels = []
         for frame_idx in range(n_frames):
@@ -563,7 +570,6 @@ class Tracker:
         Returns:
             List[sio.PredictedInstance]: The list of instances with assigned track IDs.
         """
-
         current_instances = self.get_features(instances, frame_idx, image)
 
         candidates_feature_dict = self.generate_candidates(generate_new_tracks)
@@ -745,7 +751,6 @@ class Tracker:
         Returns:
             scores: Score matrix of shape (num_new_instances, num_existing_tracks)
         """
-
         if self.scoring_method not in self._scoring_functions:
             raise ValueError(
                 "Invalid `scoring_method` argument. Please provide one of `oks`, `cosine_sim`, `iou`, and `euclidean_dist`."
@@ -925,7 +930,6 @@ class Tracker:
         Returns:
             Dict: Dictionary containing transition matrices for forward and backward directions
         """
-
         arena_width, arena_height = labels.video.shape[2], labels.video.shape[1]
 
         transitions = defaultdict(lambda: np.zeros(grid_size))
