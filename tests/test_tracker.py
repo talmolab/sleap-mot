@@ -166,6 +166,6 @@ def test_point_features(centered_pair_predictions):
 def test_tracker_track(noisy_clip_predictions_untracked):
     tracker = Tracker.from_config(candidates_method="local_queues", max_tracks=2)
 
-    tracked_labels = tracker.track(noisy_clip_predictions_untracked, inplace=True)
+    tracked_labels = tracker.track(noisy_clip_predictions_untracked)
     assert len(tracked_labels) == len(noisy_clip_predictions_untracked)
     assert len(tracked_labels.tracks) == 2

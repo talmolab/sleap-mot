@@ -27,8 +27,12 @@ def get_df(df, track_key):
                 track_key: inst.track.name if inst.track is not None else None,
             }
             points = inst.points
-            for key in points:
-                frame_meta[key.name] = (points[key].x, points[key].y)
+            for point in points:
+                if type(point) == dict:
+                    frame_meta[point["name"]] = (point["xy"][0], point["xy"][1])
+                else:
+                    node = points[point]
+                    frame_meta[point.name] = (node.x, node.y)
 
             gt_frame_meta_list.append(frame_meta)
     return_df = pd.DataFrame(gt_frame_meta_list)
@@ -98,9 +102,9 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
     # Initialize MOT metrics accumulator and tracking variables
     acc = mm.MOTAccumulator(auto_id=True)
     total_mislabeled_identities = 0
-    actual_mislabeled_identities = 0
     total_correct_identities = 0
     mislabeled_frames = []
+    correct_frames = []
 
     all_track_ids = set(df_merged["gt_track_id"].unique()) | set(
         df_merged["pred_track_id"].unique()
@@ -109,8 +113,6 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
 
     # Process each frame in the merged dataframe, limiting to first 10,000 frames
     for frame, framedf in df_merged.groupby("frame_id"):
-        if frame >= 13200:
-            break
         # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
@@ -126,13 +128,11 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
                 correct_id = False
 
             if not correct_id:
-                if "_" in pred_tracks[idx]:
-                    # print(f"mislabeled frame {frame} with gt_id {gt_id} and pred_id {pred_tracks[idx]}")
-                    actual_mislabeled_identities += 1
                 total_mislabeled_identities += 1
                 mislabeled_frames.append(frame)
             else:
                 total_correct_identities += 1
+                correct_frames.append(frame)
         # Create cost matrix for MOT metrics
         # NaN indicates no association, 1 indicates perfect match
         gt_ids = np.array([track_id_map[id] for id in gt_ids])
@@ -153,7 +153,7 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
 
     # Group consecutive mislabeled frames to analyze error patterns
     grouped_mislabeled_frames = []
-    group_lengths = []
+    mislabeled_group_lengths = []
     if mislabeled_frames:
         current_group = [mislabeled_frames[0]]
         for frame in mislabeled_frames[1:]:
@@ -163,16 +163,47 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
             else:
                 # Start new group if frames are not consecutive
                 grouped_mislabeled_frames.append(current_group)
-                group_lengths.append(len(current_group))
+                mislabeled_group_lengths.append(len(current_group))
                 current_group = [frame]
         # Add final group
         grouped_mislabeled_frames.append(current_group)
-        group_lengths.append(len(current_group))
+        mislabeled_group_lengths.append(len(current_group))
 
-    return (
-        total_mislabeled_identities,
-        group_lengths,
-        total_correct_identities,
-        actual_mislabeled_identities,
-        summary,
+    # Group consecutive correct frames to analyze error patterns
+    grouped_correct_frames = []
+    group_lengths_correct = []
+    if correct_frames:
+        current_group = [correct_frames[0]]
+        for frame in correct_frames[1:]:
+            if frame == current_group[-1]:
+                continue
+            if frame == current_group[-1] + 1:
+                current_group.append(frame)
+            else:
+                grouped_correct_frames.append(current_group)
+                group_lengths_correct.append(len(current_group))
+                current_group = [frame]
+        # Add final group
+        grouped_correct_frames.append(current_group)
+
+    # Add final group length if there's a current group
+    if current_group:
+        group_lengths_correct.append(len(current_group))
+
+    # Calculate mean of correct group lengths
+    mean_mislabeled_length = (
+        np.mean(mislabeled_group_lengths) if mislabeled_group_lengths else 0
     )
+    mean_correct_length = np.mean(group_lengths_correct) if group_lengths_correct else 0
+
+    return {
+        "total_mislabeled_identities": total_mislabeled_identities,
+        "mislabeled_group_lengths": mislabeled_group_lengths,
+        "total_correct_identities": total_correct_identities,
+        "summary": summary,
+        "grouped_mislabeled_frames": grouped_mislabeled_frames,
+        "mean_mislabeled_length": mean_mislabeled_length,
+        "grouped_correct_frames": grouped_correct_frames,
+        "group_lengths_correct": group_lengths_correct,
+        "mean_correct_length": mean_correct_length,
+    }
