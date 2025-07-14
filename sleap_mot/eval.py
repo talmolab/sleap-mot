@@ -28,7 +28,7 @@ def get_df(df, track_key):
             }
             points = inst.points
             for point in points:
-                if type(point) == dict:
+                if type(point) == dict or type(point) == np.void:
                     frame_meta[point["name"]] = (point["xy"][0], point["xy"][1])
                 else:
                     node = points[point]
