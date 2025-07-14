@@ -22,7 +22,26 @@ from sleap_mot.utils import (
 
 
 class FeatureTracker(ABC):
+    """
+    Abstract base class for feature-based tracking algorithms in SLEAP-MOT.
+
+    This class defines the interface and common utilities for implementing
+    feature-based trackers. Subclasses should implement the required abstract
+    methods to provide specific tracking logic.
+
+    Methods
+    -------
+    load_and_preprocess_labels(labels: sio.Labels, video_path: str)
+        Load and preprocess SLEAP labels for tracking.
+
+    Attributes
+    ----------
+    motion_kde_paths : Any
+        Stores motion kernel density estimation paths, if used by the tracker.
+    """
+
     def __init__(self):
+        """Initialize the FeatureTracker."""
         self.motion_kde_paths = None
 
     def load_and_preprocess_labels(self, labels: sio.Labels, video_path: str):
@@ -80,6 +99,7 @@ class FeatureTracker(ABC):
         return labels
 
     def get_iou(self, trx):
+        """Calculate IoU for each frame and pose."""
         # Calculate IoU for each frame and pose
         n_frames = trx.shape[0]
         n_poses = trx.shape[1]
@@ -224,6 +244,7 @@ class FeatureTracker(ABC):
     def get_bbox_tracklets(
         self, labels: sio.Labels, trx: np.ndarray, iou_per_pose: np.ndarray
     ):
+        """Get tracklets based on bounding box overlap."""
         tracklets = []
         curr_tracklet = []
         n_frames = trx.shape[0]
@@ -275,8 +296,13 @@ class FeatureTracker(ABC):
         iou_per_pose: np.ndarray,
         threshold: float = 0.1,
     ):
+        """Get tracklets based on motion model."""
+
         class KDE:
+            """Kernel Density Estimation class."""
+
             def __init__(self, kde, bounds):
+                """Initialize the KDE class."""
                 x_min, x_max, y_min, y_max = bounds
                 # Store the KDE model
                 self.kde = kde
@@ -791,11 +817,21 @@ class FeatureTracker(ABC):
 
 
 class RFIDFeatureTracker(FeatureTracker):
+    """
+    Feature tracker for RFID-based tracking.
+
+    This class implements a feature tracker that uses RFID data to track
+    animals in videos. It generates heatmaps from RFID pings and uses them
+    to assign tracks to animals.
+    """
+
     def __init__(self):
+        """Initialize the RFIDFeatureTracker."""
         self.heatmaps = None
         self.heatmaps_path = None
 
     def _get_hull_polygons(self, inst, body_inds, pad=0):
+        """Get convex hull polygons for an instance."""
         pts = inst.numpy()[body_inds]
         is_nan = np.isnan(pts).all(axis=-1)
         if (~is_nan).sum() < 3:
@@ -808,6 +844,7 @@ class RFIDFeatureTracker(FeatureTracker):
         return hull
 
     def _get_bounding_box_polygons(self, inst, body_inds, pad=0):
+        """Get bounding box polygons for an instance."""
         pts = inst.numpy()[body_inds]
         if np.isnan(pts).any():
             return None
@@ -818,6 +855,7 @@ class RFIDFeatureTracker(FeatureTracker):
         return bbox
 
     def _get_ellipse_polygons(self, inst, body_inds, pad=0):
+        """Get ellipse polygons for an instance."""
         pts = inst.numpy()[body_inds]
         if np.isnan(pts).any():
             return None
@@ -840,6 +878,7 @@ class RFIDFeatureTracker(FeatureTracker):
         video_timestamp,
         polygon_method="convex_hull",
     ):
+        """Get all instacne polygons for a specific unit label RFID reciever."""
         # Method mapping
         methods = {
             "convex_hull": self._get_hull_polygons,
@@ -888,6 +927,7 @@ class RFIDFeatureTracker(FeatureTracker):
         return polygons
 
     def _rasterize_polygon(self, polygon, image_width, image_height, bin_size=1):
+        """Rasterize a polygon into a binary mask."""
         XX, YY = np.meshgrid(
             np.arange(0, image_width, bin_size), np.arange(0, image_height, bin_size)
         )
@@ -1231,10 +1271,20 @@ class RFIDFeatureTracker(FeatureTracker):
 
 
 class FurColorFeatureTracker(FeatureTracker):
+    """
+    Feature tracker for fur color-based tracking.
+
+    This class implements a feature tracker that uses fur color data to track
+    animals in videos. It generates heatmaps from fur color data and uses them
+    to assign tracks to animals.
+    """
+
     def __init__(self):
+        """Initialize the FurColorFeatureTracker."""
         pass
 
     def run_pca(self, features, confidence_vector):
+        """Run PCA on features and confidence vector."""
         feats = features["frequencies"]
         feats = np.array(feats)
         feats_reshaped = feats.reshape(
@@ -1259,6 +1309,7 @@ class FurColorFeatureTracker(FeatureTracker):
         return G, X, Z
 
     def run_knn(X, G, Z, features, confidence_vector):
+        """Run KNN on features and confidence vector."""
         n = int(features["frequencies"].shape[0] * 0.005)
         if n < 2:
             n = 2
@@ -1292,7 +1343,7 @@ class FurColorFeatureTracker(FeatureTracker):
         method: str = "bbox",
         kde_paths: tuple = None,
     ):
-
+        """Track instances across frames using either bbox or motion-based tracking."""
         if method == "bbox":
             trx = self.extract_tracking_data(labels)
             tracklets = self.get_bbox_tracklets(labels, trx)
