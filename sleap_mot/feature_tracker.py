@@ -1,3 +1,28 @@
+"""
+Feature-based tracking algorithms for SLEAP-MOT.
+
+This module provides abstract base classes and concrete implementations for
+feature-based tracking algorithms in SLEAP-MOT (SLEAP Multi-Object Tracking).
+The module includes trackers that use various features such as RFID data,
+fur color, and motion models to track multiple objects across video frames.
+
+Classes
+-------
+FeatureTracker : ABC
+    Abstract base class for feature-based tracking algorithms.
+RFIDFeatureTracker : FeatureTracker
+    RFID-based tracking using spatial heatmaps and RFID ping data.
+FurColorFeatureTracker : FeatureTracker
+    Fur color-based tracking using PCA and KNN clustering.
+
+Examples
+--------
+>>> from sleap_mot.feature_tracker import RFIDFeatureTracker
+>>> tracker = RFIDFeatureTracker()
+>>> tracker.generate_heatmaps(rfid_data, slp_files, video_files)
+>>> tracked_labels = tracker.track(labels, video_path, output_path, rfid_data)
+"""
+
 from abc import ABC, abstractmethod
 import sleap_io as sio
 from pathlib import Path
@@ -22,8 +47,7 @@ from sleap_mot.utils import (
 
 
 class FeatureTracker(ABC):
-    """
-    Abstract base class for feature-based tracking algorithms in SLEAP-MOT.
+    """Abstract base class for feature-based tracking algorithms in SLEAP-MOT.
 
     This class defines the interface and common utilities for implementing
     feature-based trackers. Subclasses should implement the required abstract
@@ -46,7 +70,6 @@ class FeatureTracker(ABC):
 
     def load_and_preprocess_labels(self, labels: sio.Labels, video_path: str):
         """Load and preprocess SLEAP labels."""
-
         # Replace video paths
         labels.replace_filenames(
             prefix_map={
@@ -323,8 +346,7 @@ class FeatureTracker(ABC):
                 self.max_density = density.max()
 
             def get_probability(self, point):
-                """
-                Get probability density at a point, normalized by maximum density.
+                """Get probability density at a point, normalized by maximum density.
 
                 Args:
                     point: Array-like of shape (2,) containing x,y coordinates
@@ -332,7 +354,6 @@ class FeatureTracker(ABC):
                 Returns:
                     float: Probability density at the point normalized between 0 and 1
                 """
-
                 x, y = point
 
                 if x < self.x_min or x > self.x_max or y < self.y_min or y > self.y_max:
@@ -674,8 +695,7 @@ class FeatureTracker(ABC):
         return motion_sequences, thetas, idle_count, motion_count
 
     def generate_motion_kde_models(self, slp_folder, video_folder, output_dir="./"):
-        """
-        Generate long and short distance KDE motion models from SLEAP tracking data.
+        """Generate long and short distance KDE motion models from SLEAP tracking data.
 
         Args:
             slp_folder (str or Path): Path to folder containing .slp files
@@ -685,7 +705,6 @@ class FeatureTracker(ABC):
         Returns:
             tuple: Paths to the generated long and short KDE joblib files
         """
-
         slp_folder = Path(slp_folder)
         video_folder = Path(video_folder)
         output_dir = Path(output_dir)
@@ -813,12 +832,12 @@ class FeatureTracker(ABC):
 
     @abstractmethod
     def track(self, *args, **kwargs):
+        """Abstract method to be implemented by subclasses."""
         pass
 
 
 class RFIDFeatureTracker(FeatureTracker):
-    """
-    Feature tracker for RFID-based tracking.
+    """Feature tracker for RFID-based tracking.
 
     This class implements a feature tracker that uses RFID data to track
     animals in videos. It generates heatmaps from RFID pings and uses them
@@ -947,11 +966,9 @@ class RFIDFeatureTracker(FeatureTracker):
         bin_size=1,
         polygon_method="convex_hull",
     ):
-        """
-        Generate RFID heatmaps for each unit and save to H5 file.
+        """Generate RFID heatmaps for each unit and save to H5 file.
 
-        Parameters
-        ----------
+        Args:
         rfid_pings_path : str or Path
             Path to the CSV file containing RFID ping data
         slp_paths : list of str or Path
@@ -969,12 +986,11 @@ class RFIDFeatureTracker(FeatureTracker):
             Video number to filter RFID pings. If None, uses all videos
         bin_size : int, optional
             Size of bins for rasterization (default: 1)
-        progress_bar : bool, optional
-            Whether to show progress bar (default: True)
+        polygon_method : str, optional
+            Method to use for polygon generation (default: "convex_hull")
 
-        Returns
-        -------
-        tuple
+        Returns:
+        tuple:
             (plots_by_unit, unique_units) where plots_by_unit is a list of heatmap arrays
             and unique_units is an array of unit labels
         """
