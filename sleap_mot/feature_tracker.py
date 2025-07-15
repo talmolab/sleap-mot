@@ -1,5 +1,4 @@
-"""
-Feature-based tracking algorithms for SLEAP-MOT.
+"""Feature-based tracking algorithms for SLEAP-MOT.
 
 This module provides abstract base classes and concrete implementations for
 feature-based tracking algorithms in SLEAP-MOT (SLEAP Multi-Object Tracking).
@@ -1287,8 +1286,7 @@ class RFIDFeatureTracker(FeatureTracker):
 
 
 class FurColorFeatureTracker(FeatureTracker):
-    """
-    Feature tracker for fur color-based tracking.
+    """Feature tracker for fur color-based tracking.
 
     This class implements a feature tracker that uses fur color data to track
     animals in videos. It generates heatmaps from fur color data and uses them
