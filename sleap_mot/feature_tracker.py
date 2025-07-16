@@ -35,6 +35,10 @@ from sklearn.neighbors import KernelDensity
 from collections import Counter
 from scipy.stats import kde
 import math
+from functools import partial
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 from sleap_mot.utils import (
     get_bbox,
@@ -188,12 +192,20 @@ class FeatureTracker(ABC):
                 # Initialize a dictionary for this row with 'frame_idx' and 'track'
                 row = {"frame_idx": frame_data.frame_idx, "track": inst.track.name}
                 for point in inst.points:
-                    if point is not None:
+                    if (
+                        point is not None
+                        and type(point) == dict
+                        or type(point) == np.void
+                    ):
                         row[f"{point['name']}.x"] = point["xy"][0]
                         row[f"{point['name']}.y"] = point["xy"][1]
                         row[f"{point['name']}.score"] = (
                             point["score"] if hasattr(point, "score") else 1
                         )
+                    elif point is not None:
+                        row[f"{point.name}.x"] = inst.points[point].x
+                        row[f"{point.name}.y"] = inst.points[point].y
+                        row[f"{point.name}.score"] = inst.points[point].score
                     else:
                         row[f"{point['name']}.x"] = "NaN"
                         row[f"{point['name']}.y"] = "NaN"
@@ -227,7 +239,7 @@ class FeatureTracker(ABC):
 
         iou_per_pose = self.get_iou(trx)
 
-        return tracks, trx, track_names, iou_per_pose
+        return trx, track_names, iou_per_pose
 
     def find_close_poses(self, pose_instance, labels, frame_idx, threshold=15):
         """Find poses with bounding boxes that are close to each other."""
@@ -264,7 +276,11 @@ class FeatureTracker(ABC):
         return close_poses
 
     def get_bbox_tracklets(
-        self, labels: sio.Labels, trx: np.ndarray, iou_per_pose: np.ndarray
+        self,
+        labels: sio.Labels,
+        trx: np.ndarray,
+        iou_per_pose: np.ndarray,
+        threshold: float = 0.1,
     ):
         """Get tracklets based on bounding box overlap."""
         tracklets = []
@@ -308,7 +324,7 @@ class FeatureTracker(ABC):
                 if len(curr_tracklet) > 0:
                     tracklets.append(curr_tracklet)
 
-        return tracklet_matrix, tracklets
+        return tracklets
 
     def get_motion_tracklets(
         self,
@@ -560,6 +576,7 @@ class FeatureTracker(ABC):
 
         # Generate new track IDs for each tracklet
         for tracklet, track_id_list in tracklet_id_pairs:
+
             if len(set(track_id_list)) > 1:
                 # Count occurrences of each ID
                 id_counts = Counter(track_id_list)
@@ -828,6 +845,23 @@ class FeatureTracker(ABC):
         self.motion_kde_paths = (str(long_kde_path), str(short_kde_path))
 
         return str(long_kde_path), str(short_kde_path)
+
+    def get_tracklets(self, labels, method, trx, iou_per_pose):
+        if method == "bbox":
+            tracklets = self.get_bbox_tracklets(labels, trx, iou_per_pose)
+        elif method == "motion":
+            if self.motion_kde_paths is None:
+                raise ValueError(
+                    "motion_kde_paths must be generated before using motion tracking"
+                )
+            long_kde_path, short_kde_path = self.motion_kde_paths
+            tracklets = self.get_motion_tracklets(
+                labels, long_kde_path, short_kde_path, iou_per_pose
+            )
+        else:
+            raise ValueError("method must be either 'bbox' or 'motion'")
+
+        return tracklets
 
     @abstractmethod
     def track(self, *args, **kwargs):
@@ -1233,7 +1267,6 @@ class RFIDFeatureTracker(FeatureTracker):
         output_path: str,
         rfid_pings_path: str,
         method: str = "bbox",
-        kde_paths: tuple = None,
     ):
         """Track instances across frames using either bbox or motion-based tracking.
 
@@ -1243,7 +1276,6 @@ class RFIDFeatureTracker(FeatureTracker):
             output_path: Path to save tracking results
             rfid_pings_path: Path to RFID ping data
             method: Tracking method to use - either "bbox" or "motion" (default: "bbox")
-            kde_paths: Tuple of (long_kde_path, short_kde_path) required for motion tracking
         """
         with h5py.File(self.heatmaps_path, "r") as f:
             plots_by_unit = list(f["plots_by_unit"])
@@ -1253,21 +1285,9 @@ class RFIDFeatureTracker(FeatureTracker):
             )
 
         labels = self.load_and_preprocess_labels(labels, video_path)
-        tracks, trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
+        trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
 
-        if method == "bbox":
-            tracklets = self.get_bbox_tracklets(labels, trx, iou_per_pose)
-        elif method == "motion":
-            if self.motion_kde_paths is None:
-                raise ValueError(
-                    "motion_kde_paths must be provided when using motion tracking"
-                )
-            long_kde_path, short_kde_path = self.motion_kde_paths
-            tracklets = self.get_motion_tracklets(
-                labels, long_kde_path, short_kde_path, iou_per_pose
-            )
-        else:
-            raise ValueError("method must be either 'bbox' or 'motion'")
+        tracklets = self.get_tracklets(labels, method, trx, iou_per_pose)
 
         rfid_pings = pd.read_csv(rfid_pings_path)
         tracklet_id_pairs = [(tracklet, []) for tracklet in tracklets]
@@ -1297,19 +1317,104 @@ class FurColorFeatureTracker(FeatureTracker):
         """Initialize the FurColorFeatureTracker."""
         pass
 
-    def run_pca(self, features, confidence_vector):
+    def get_patches(self, lf: sio.LabeledFrame, patch_size: int = 5):
+
+        xv = np.arange(-patch_size // 2 + 1, patch_size // 2 + 1)
+        yv = np.arange(-patch_size // 2 + 1, patch_size // 2 + 1)
+        grid = np.stack(np.meshgrid(xv, yv), axis=-1)
+
+        poses = lf.numpy()
+        for pose in poses:
+            mask = np.isnan(pose).any(axis=-1)
+            missing_nodes_count = np.sum(mask)
+            total_nodes = pose.shape[0]
+
+            if (missing_nodes_count / total_nodes) >= 0.6:
+                patches = np.full(
+                    (poses.shape[0], poses.shape[1], patch_size, patch_size, 1), -1
+                )
+                return patches, mask
+
+        mask = np.isnan(poses).any(axis=-1)
+
+        centers = np.round(poses)
+        centers = np.where(np.isnan(centers), 0, centers)
+
+        img = lf.image
+
+        patch_inds = centers.reshape(centers.shape[0], centers.shape[1], 1, 1, 2) + grid
+        patch_inds[..., 1] = np.clip(patch_inds[..., 1], 0, img.shape[0] - 1)
+        patch_inds[..., 0] = np.clip(patch_inds[..., 0], 0, img.shape[1] - 1)
+        patch_inds = patch_inds.astype(int)
+
+        patches = img[patch_inds[..., 1], patch_inds[..., 0]]
+
+        patches = np.where(
+            mask.reshape(poses.shape[0], poses.shape[1], 1, 1, 1), -1, patches
+        )
+
+        valid_pixels = patches[patches != -1]
+        avg_pixel_value = int(np.mean(valid_pixels))
+
+        patches = np.where(patches == -1, avg_pixel_value, patches)
+
+        return patches, mask
+
+    def get_binned_freqs(self, patches, mask=None, n_bins=4):
+        bins = np.arange(0, 255, 256 // n_bins)[1:]
+
+        binned = np.digitize(patches, bins)
+        binned = binned.reshape(binned.shape[0] * binned.shape[1], -1)
+        count_fn = partial(np.bincount, minlength=n_bins)
+
+        counts = np.apply_along_axis(count_fn, axis=1, arr=binned)
+        freqs = counts / counts.sum(axis=1, keepdims=True)
+        freqs = freqs.reshape(patches.shape[0], patches.shape[1], n_bins)
+
+        if mask is not None:
+            freqs = np.where(mask.reshape(*mask.shape, 1), 0, freqs)
+        return freqs
+
+    def feature_extraction(self, labels, n_tracks, n_frames):
+        """Extract features from labels."""
+        patches = np.full((n_frames, n_tracks, 15, 5, 5, 1), -1)
+        freqs = np.full((n_frames, n_tracks, 15, 4), 0)
+
+        for lf_idx, lf in enumerate(labels):
+            if len(lf.instances) > 0:
+                patches_, mask = self.get_patches(lf)
+                freqs_ = self.get_binned_freqs(patches_, mask)
+            else:
+                # If no instances, fill with -1 and 0 for all tracks
+                patches_ = np.full((n_tracks, 15, 5, 5, 1), -1)
+                freqs_ = np.zeros((n_tracks, 15, 4))
+
+            # If only one instance, but patches_ and freqs_ are shape (1, ...), pad to (n_tracks, ...)
+            if patches_.shape[0] < n_tracks:
+                padded_patches = np.full((n_tracks, 15, 5, 5, 1), -1)
+                padded_freqs = np.zeros((n_tracks, 15, 4))
+                padded_patches[: patches_.shape[0]] = patches_
+                padded_freqs[: freqs_.shape[0]] = freqs_
+                patches_ = padded_patches
+                freqs_ = padded_freqs
+
+            patches[lf_idx] = patches_
+            freqs[lf_idx] = freqs_
+
+        return freqs
+
+    def run_pca(self, freqs, confidence_vector):
         """Run PCA on features and confidence vector."""
-        feats = features["frequencies"]
-        feats = np.array(feats)
-        feats_reshaped = feats.reshape(
-            feats.shape[0] * 2, feats.shape[2] * feats.shape[3]
+        freqs = np.array(freqs)
+        freqs_reshaped = freqs.reshape(
+            freqs.shape[0] * 2, freqs.shape[2] * freqs.shape[3]
         )
 
         # Flatten confidence vector to align with reshaped features
         conf_flat = confidence_vector.flatten()
 
         # Select only valid poses using boolean indexing
-        X = feats_reshaped[conf_flat]
+        X = freqs_reshaped[conf_flat]
 
         # Fit PCA and transform data
         pcs = PCA()
@@ -1322,9 +1427,9 @@ class FurColorFeatureTracker(FeatureTracker):
 
         return G, X, Z
 
-    def run_knn(X, G, Z, features, confidence_vector):
+    def run_knn(self, X, G, Z, freqs, confidence_vector):
         """Run KNN on features and confidence vector."""
-        n = int(features["frequencies"].shape[0] * 0.005)
+        n = int(freqs.shape[0] * 0.005)
         if n < 2:
             n = 2
 
@@ -1349,31 +1454,68 @@ class FurColorFeatureTracker(FeatureTracker):
 
         return G_mapped
 
+    def get_tracklet_id_pairs_from_knn(self, tracklets, G_mapped, track_names):
+        tracklet_id_pairs = []
+
+        for tracklet in tracklets:
+            curr_tracks = []
+            for frame_idx, pose_idx in tracklet:
+                track_idx = G_mapped[frame_idx, pose_idx]
+                curr_tracks.append(track_names[track_idx])
+            tracklet_id_pairs.append((tracklet, curr_tracks))
+
+        return tracklet_id_pairs
+
+    def get_confidence_vector(self, tracklets, n_frames, n_tracks):
+        # Since tracklets is already provided as input, we only need to create is_already_in_tracklet
+        # and mark the positions in it that are present in the tracklets.
+        # We assume tracklets is a list of lists of (frame_idx, pose_idx) tuples.
+
+        # First, determine the shape of confidence_vector from the tracklets
+        if not tracklets:
+            return None, tracklets  # or (None, []) if no tracklets
+
+        confidence_vector = np.full((n_frames, n_tracks), False)
+
+        for tracklet in tracklets:
+            for frame_idx, pose_idx in tracklet:
+                confidence_vector[frame_idx, pose_idx] = True
+
+        return confidence_vector
+
     def track(
         self,
         labels: sio.Labels,
         video_path: str,
         output_path: str,
         method: str = "bbox",
-        kde_paths: tuple = None,
     ):
         """Track instances across frames using either bbox or motion-based tracking."""
-        if method == "bbox":
-            trx = self.extract_tracking_data(labels)
-            tracklets = self.get_bbox_tracklets(labels, trx)
-        elif method == "motion":
-            if kde_paths is None:
-                raise ValueError(
-                    "kde_paths must be provided when using motion tracking"
-                )
-            long_kde_path, short_kde_path = kde_paths
-            tracklets = self.get_motion_tracklets(labels, long_kde_path, short_kde_path)
+        output_features_path = "/root/vast/elise/sleap-mot-elise/notebooks/mov.00001.predictions.features.h5"
+        features = h5py.File(output_features_path, "r")
+        freqs = features["frequencies"]
 
-            G, X, Z = self.run_pca(features, confidence_vector)
-            G_mapped = self.run_knn(X, G, Z, features, confidence_vector)
+        labels = self.load_and_preprocess_labels(labels, video_path)
+        trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
+        n_tracks = len(track_names)
+        n_frames = len(labels)
 
-            labels = self.assign_track_ids(tracklet_id_pairs, labels)
+        tracklets = self.get_tracklets(labels, method, trx, iou_per_pose)
 
-            sio.save_file(labels, output_path)
+        # freqs = self.feature_extraction(labels, n_tracks, n_frames)
+        print("Loaded features")
 
-            return labels
+        confidence_vector = self.get_confidence_vector(tracklets, n_frames, n_tracks)
+
+        G, X, Z = self.run_pca(freqs, confidence_vector)
+        G_mapped = self.run_knn(X, G, Z, freqs, confidence_vector)
+
+        tracklet_id_pairs = self.get_tracklet_id_pairs_from_knn(
+            tracklets, G_mapped, track_names
+        )
+
+        self.assign_track_ids(tracklet_id_pairs, labels)
+
+        sio.save_file(labels, output_path)
+
+        return labels
