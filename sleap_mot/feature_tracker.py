@@ -847,6 +847,7 @@ class FeatureTracker(ABC):
         return str(long_kde_path), str(short_kde_path)
 
     def get_tracklets(self, labels, method, trx, iou_per_pose):
+        """Get tracklets from labels using specified method."""
         if method == "bbox":
             tracklets = self.get_bbox_tracklets(labels, trx, iou_per_pose)
         elif method == "motion":
@@ -1318,7 +1319,7 @@ class FurColorFeatureTracker(FeatureTracker):
         pass
 
     def get_patches(self, lf: sio.LabeledFrame, patch_size: int = 5):
-
+        """Get patches from a labeled frame."""
         xv = np.arange(-patch_size // 2 + 1, patch_size // 2 + 1)
         yv = np.arange(-patch_size // 2 + 1, patch_size // 2 + 1)
         grid = np.stack(np.meshgrid(xv, yv), axis=-1)
@@ -1361,6 +1362,7 @@ class FurColorFeatureTracker(FeatureTracker):
         return patches, mask
 
     def get_binned_freqs(self, patches, mask=None, n_bins=4):
+        """Get binned pixel frequencies from patches."""
         bins = np.arange(0, 255, 256 // n_bins)[1:]
 
         binned = np.digitize(patches, bins)
@@ -1455,6 +1457,7 @@ class FurColorFeatureTracker(FeatureTracker):
         return G_mapped
 
     def get_tracklet_id_pairs_from_knn(self, tracklets, G_mapped, track_names):
+        """Get tracklet id pairs from KNN results."""
         tracklet_id_pairs = []
 
         for tracklet in tracklets:
@@ -1467,13 +1470,9 @@ class FurColorFeatureTracker(FeatureTracker):
         return tracklet_id_pairs
 
     def get_confidence_vector(self, tracklets, n_frames, n_tracks):
-        # Since tracklets is already provided as input, we only need to create is_already_in_tracklet
-        # and mark the positions in it that are present in the tracklets.
-        # We assume tracklets is a list of lists of (frame_idx, pose_idx) tuples.
-
-        # First, determine the shape of confidence_vector from the tracklets
+        """Get vector specifying which poses from which frames are included in tracklets."""
         if not tracklets:
-            return None, tracklets  # or (None, []) if no tracklets
+            return None, tracklets
 
         confidence_vector = np.full((n_frames, n_tracks), False)
 
