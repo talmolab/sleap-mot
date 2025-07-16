@@ -6,6 +6,7 @@ import numpy as np
 import sleap_io as sio
 from typing import List, Tuple, Dict
 import cv2
+import math
 
 
 def compute_instance_area(points: np.ndarray) -> np.ndarray:
@@ -191,18 +192,23 @@ def get_centroid(pred_instance: sio.PredictedInstance | np.ndarray):
 
 def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
     """Return the bounding box coordinates for the `PredictedInstance` object."""
-    points = (
-        pred_instance.numpy()
-        if not isinstance(pred_instance, np.ndarray)
-        else pred_instance
-    )
-    bbox = np.concatenate(
-        [
-            np.nanmin(points, axis=0),
-            np.nanmax(points, axis=0),
-        ]  # [xmin, ymin, xmax, ymax]
-    )
-    return bbox
+    points = pred_instance.numpy()
+    points = points[~np.isnan(points).any(axis=1)]
+
+    # Get center point
+    center = np.nanmean(points, axis=0)
+
+    # Get radius as max distance from center to any point
+    radius = np.max(np.linalg.norm(points - center, axis=1))
+
+    # Add 5 pixels to radius for padding
+    radius = radius + 5
+
+    # Get bounding box coordinates
+    x0y0_pose = center - radius
+    x1y1_pose = center + radius
+
+    return x0y0_pose, x1y1_pose
 
 
 def compute_euclidean_distance(a, b):
@@ -460,3 +466,53 @@ def combine_cost_dicts(
         combined[key] = alpha * pos_cost + beta * vis_cost
 
     return combined
+
+
+def rotate_points(points, theta):
+    """Rotate points by given angle."""
+    x, y = points[0], points[1]
+
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+
+    x_new = (x * cos_theta) + (y * sin_theta)
+    y_new = -(x * sin_theta) + (y * cos_theta)
+
+    return x_new, y_new
+
+
+def tri_point_motion_model(p1, p2, p3):
+    """Calculate motion model for three consecutive points."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+
+    p2_hat = (0, 0)  # Origin point
+    p1_hat = (x1 - x2, y1 - y2)
+    p3_hat = (x3 - x2, y3 - y2)
+
+    j = (0, -1)
+    # Find angle between j and p1_hat using dot product formula
+    theta = math.atan2(-p1_hat[0], p1_hat[1])
+
+    p1_hat = rotate_points(p1_hat, theta)
+    p3_hat = rotate_points(p3_hat, theta)
+
+    return theta, p1_hat, p2_hat, p3_hat
+
+
+def check_bbox_overlap(bbox1, bbox2):
+    """Check if two bounding boxes overlap."""
+    # Extract coordinates
+    (x1_1, y1_1), (x2_1, y2_1) = bbox1
+    (x1_2, y1_2), (x2_2, y2_2) = bbox2
+
+    # Check if one box is to the right of the other
+    if x1_1 > x2_2 or x1_2 > x2_1:
+        return False
+
+    # Check if one box is above the other
+    if y1_1 > y2_2 or y1_2 > y2_1:
+        return False
+
+    return True

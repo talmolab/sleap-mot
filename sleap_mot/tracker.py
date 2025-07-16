@@ -976,7 +976,7 @@ class Tracker:
             Dict: Dictionary mapping track names to averaged visual features
         """
 
-        def full_pose_available(inst: sio.PredictedInstance) -> bool:
+        def full_pose_available(inst: np.ndarray) -> bool:
             """Check if all keypoints in an instance are available (not NaN).
 
             Args:
@@ -985,8 +985,8 @@ class Tracker:
             Returns:
                 bool: True if all keypoints are available, False otherwise
             """
-            for point in inst.points.values():
-                if np.isnan(point.x) or np.isnan(point.y):
+            for point in inst:
+                if np.isnan(point[0]) or np.isnan(point[1]):
                     return False
             return True
 
@@ -997,7 +997,7 @@ class Tracker:
             image = next(reader)
             for inst in lf.instances:
                 if inst.track.name in self.global_track_ids and full_pose_available(
-                    inst
+                    inst.numpy()
                 ):
                     visual_features = get_bbox_pixel_intensities(
                         inst, image, patch_dimension
