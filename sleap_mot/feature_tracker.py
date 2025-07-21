@@ -194,18 +194,12 @@ class FeatureTracker(ABC):
                 for point in inst.points:
                     if (
                         point is not None
-                        and type(point) == dict
-                        or type(point) == np.void
                     ):
                         row[f"{point['name']}.x"] = point["xy"][0]
                         row[f"{point['name']}.y"] = point["xy"][1]
                         row[f"{point['name']}.score"] = (
                             point["score"] if hasattr(point, "score") else 1
                         )
-                    elif point is not None:
-                        row[f"{point.name}.x"] = inst.points[point].x
-                        row[f"{point.name}.y"] = inst.points[point].y
-                        row[f"{point.name}.score"] = inst.points[point].score
                     else:
                         row[f"{point['name']}.x"] = "NaN"
                         row[f"{point['name']}.y"] = "NaN"
@@ -627,6 +621,9 @@ class FeatureTracker(ABC):
                 existing_track = next(
                     (t for t in labels.tracks if t.name == track_id), None
                 )
+                if track_id == None:
+                    set_track_id(tracklet, None, labels)
+                    continue
                 track = existing_track if existing_track else sio.Track(name=track_id)
                 if not existing_track:
                     labels.tracks.append(track)
@@ -1377,7 +1374,7 @@ class FurColorFeatureTracker(FeatureTracker):
             freqs = np.where(mask.reshape(*mask.shape, 1), 0, freqs)
         return freqs
 
-    def feature_extraction(self, labels, n_tracks, n_frames):
+    def feature_extraction(self, labels, n_tracks, n_frames, output_features_path=None):
         """Extract features from labels."""
         patches = np.full((n_frames, n_tracks, 15, 5, 5, 1), -1)
         freqs = np.full((n_frames, n_tracks, 15, 4), 0)
@@ -1402,6 +1399,10 @@ class FurColorFeatureTracker(FeatureTracker):
 
             patches[lf_idx] = patches_
             freqs[lf_idx] = freqs_
+
+        if output_features_path is not None:
+            with h5py.File(output_features_path, "w") as f:
+                f.create_dataset("frequencies", data=freqs)
 
         return freqs
 
@@ -1454,6 +1455,10 @@ class FurColorFeatureTracker(FeatureTracker):
         true_positions = np.where(confidence_vector)
         G_mapped[true_positions] = G
 
+        for frame in G_mapped:
+            if len(set(frame)) != len(frame):
+                frame[:] = -1
+
         return G_mapped
 
     def get_tracklet_id_pairs_from_knn(self, tracklets, G_mapped, track_names):
@@ -1464,6 +1469,9 @@ class FurColorFeatureTracker(FeatureTracker):
             curr_tracks = []
             for frame_idx, pose_idx in tracklet:
                 track_idx = G_mapped[frame_idx, pose_idx]
+                if track_idx == -1:
+                    curr_tracks.append(None)
+                    continue
                 curr_tracks.append(track_names[track_idx])
             tracklet_id_pairs.append((tracklet, curr_tracks))
 
@@ -1488,11 +1496,11 @@ class FurColorFeatureTracker(FeatureTracker):
         video_path: str,
         output_path: str,
         method: str = "bbox",
+        output_features_path: str = None
     ):
         """Track instances across frames using either bbox or motion-based tracking."""
-        output_features_path = "/root/vast/elise/sleap-mot-elise/notebooks/mov.00001.predictions.features.h5"
-        features = h5py.File(output_features_path, "r")
-        freqs = features["frequencies"]
+        # features = h5py.File(output_features_path, "r")
+        # freqs = features["frequencies"]
 
         labels = self.load_and_preprocess_labels(labels, video_path)
         trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
@@ -1501,7 +1509,7 @@ class FurColorFeatureTracker(FeatureTracker):
 
         tracklets = self.get_tracklets(labels, method, trx, iou_per_pose)
 
-        # freqs = self.feature_extraction(labels, n_tracks, n_frames)
+        freqs = self.feature_extraction(labels, n_tracks, n_frames, output_features_path)
         print("Loaded features")
 
         confidence_vector = self.get_confidence_vector(tracklets, n_frames, n_tracks)

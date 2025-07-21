@@ -28,11 +28,7 @@ def get_df(df, track_key):
             }
             points = inst.points
             for point in points:
-                if type(point) == dict or type(point) == np.void:
-                    frame_meta[point["name"]] = (point["xy"][0], point["xy"][1])
-                else:
-                    node = points[point]
-                    frame_meta[point.name] = (node.x, node.y)
+                frame_meta[point["name"]] = (point["xy"][0], point["xy"][1])
 
             gt_frame_meta_list.append(frame_meta)
     return_df = pd.DataFrame(gt_frame_meta_list)
@@ -154,6 +150,7 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
     # Group consecutive mislabeled frames to analyze error patterns
     grouped_mislabeled_frames = []
     mislabeled_group_lengths = []
+    current_group = None
     if mislabeled_frames:
         current_group = [mislabeled_frames[0]]
         for frame in mislabeled_frames[1:]:
