@@ -61,7 +61,9 @@ def get_df(df, track_key):
     return return_df
 
 
-def get_metrics(df_gt_in, df_pred_in, track_dict=None):
+def get_metrics(
+    df_gt_in, df_pred_in, track_dict=None, max_frames=None, none_tracks=False
+):
     """Get metrics for tracking using a ground truth (proofread) file and a predicted file.
 
     Args:
@@ -109,6 +111,8 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
 
     # Process each frame in the merged dataframe, limiting to first 10,000 frames
     for frame, framedf in df_merged.groupby("frame_id"):
+        if max_frames is not None and frame > max_frames:
+            break
         # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
@@ -123,29 +127,68 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
             if gt_id != pred_id:
                 correct_id = False
 
+            if none_tracks:
+                if pred_id is None:
+                    continue
+
             if not correct_id:
+                # print(
+                #     f"Mislabeled frame {frame} with gt_id {gt_id} and pred_id {pred_id}"
+                # )
                 total_mislabeled_identities += 1
                 mislabeled_frames.append(frame)
             else:
                 total_correct_identities += 1
                 correct_frames.append(frame)
-        # Create cost matrix for MOT metrics
-        # NaN indicates no association, 1 indicates perfect match
-        gt_ids = np.array([track_id_map[id] for id in gt_ids])
-        pred_tracks = np.array([track_id_map[id] for id in pred_tracks])
-        cost_gt_pred = np.full((len(gt_ids), len(pred_tracks)), np.nan)
-        np.fill_diagonal(cost_gt_pred, 1)
 
-        # Update MOT accumulator with frame data
-        acc.update(
-            oids=gt_ids,  # Ground truth object IDs
-            hids=pred_tracks,  # Hypothesis (predicted) IDs
-            dists=cost_gt_pred,  # Distance/cost matrix
-        )
+        # current_track_ids = set(gt_ids) | set(pred_tracks)
+        # for track_id in current_track_ids:
+        #     if track_id not in track_id_map:
+        #         track_id_map[track_id] = len(track_id_map)
+
+        # # Create cost matrix for MOT metrics
+        # # NaN indicates no association, 1 indicates perfect match
+        # gt_ids = np.array([track_id_map[id] for id in gt_ids])
+        # pred_tracks = np.array([track_id_map[id] for id in pred_tracks])
+        # cost_gt_pred = np.full((len(gt_ids), len(pred_tracks)), np.nan)
+        # np.fill_diagonal(cost_gt_pred, 1)
+
+        # # Update MOT accumulator with frame data
+        # acc.update(
+        #     oids=gt_ids,  # Ground truth object IDs
+        #     hids=pred_tracks,  # Hypothesis (predicted) IDs
+        #     dists=cost_gt_pred,  # Distance/cost matrix
+        # )
+
+        # valid_gt_ids = [int(tid) for tid in gt_ids if tid is not None and pd.notna(tid)]
+        # valid_pred_tracks = [int(tid) for tid in pred_tracks if tid is not None and pd.notna(tid)]
+
+        # # Update track_id_map with any new track IDs
+        # current_track_ids = set(valid_gt_ids) | set(valid_pred_tracks)
+        # for track_id in current_track_ids:
+        #     if track_id not in track_id_map:
+        #         track_id_map[track_id] = len(track_id_map)
+
+        # # Create cost matrix for MOT metrics
+        # # NaN indicates no association, 1 indicates perfect match
+        # gt_ids_mapped = np.array([track_id_map[tid] for tid in valid_gt_ids])
+        # pred_tracks_mapped = np.array([track_id_map[tid] for tid in valid_pred_tracks])
+
+        # # Only proceed if we have valid track IDs
+        # if len(gt_ids_mapped) > 0 and len(pred_tracks_mapped) > 0:
+        #     cost_gt_pred = np.full((len(gt_ids_mapped), len(pred_tracks_mapped)), np.nan)
+        #     np.fill_diagonal(cost_gt_pred, 1)
+
+        #     # Update MOT accumulator with frame data
+        #     acc.update(
+        #         oids=gt_ids_mapped,  # Ground truth object IDs
+        #         hids=pred_tracks_mapped,  # Hypothesis (predicted) IDs
+        #         dists=cost_gt_pred,  # Distance/cost matrix
+        #     )
 
     # Compute MOT metrics
-    mh = mm.metrics.create()
-    summary = mh.compute(acc, name="acc").transpose()
+    # mh = mm.metrics.create()
+    # summary = mh.compute(acc, name="acc").transpose()
 
     # Group consecutive mislabeled frames to analyze error patterns
     grouped_mislabeled_frames = []
@@ -197,7 +240,7 @@ def get_metrics(df_gt_in, df_pred_in, track_dict=None):
         "total_mislabeled_identities": total_mislabeled_identities,
         "mislabeled_group_lengths": mislabeled_group_lengths,
         "total_correct_identities": total_correct_identities,
-        "summary": summary,
+        # "summary": summary,
         "grouped_mislabeled_frames": grouped_mislabeled_frames,
         "mean_mislabeled_length": mean_mislabeled_length,
         "grouped_correct_frames": grouped_correct_frames,

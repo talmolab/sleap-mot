@@ -462,8 +462,8 @@ class Tracker:
 
         can_load_images = labels.video.exists()
 
-        sorted_labels = self.sort_labels(labels)
-        labels.labeled_frames = sorted_labels
+        # sorted_labels = self.sort_labels(labels)
+        # labels.labeled_frames = sorted_labels
 
         self.global_track_ids = {t.name: t for t in labels.tracks}
 
@@ -1080,6 +1080,9 @@ class Tracker:
                     else:
                         seq_inst, seq_frame = prev_inst, prev_frame
                         seq_direction = -1
+
+                if prev_frame is None and seq_frame is None:
+                    continue
 
                 if prev_frame is None:
                     prev_inst = seq_inst
