@@ -297,7 +297,18 @@ class FeatureTracker(ABC):
         KDE_samples: int,
         percentile: int,
     ):
-        """Get tracklets based on motion model."""
+        """Get tracklets based on motion model.
+
+        Args:
+            labels: SLEAP labels object containing instances to track
+            long_kde_path: Path to long distance KDE model
+            short_kde_path: Path to short distance KDE model
+            iou_per_pose: IoU per pose
+            iou_thresh: IoU threshold
+            max_motion_gap: Maximum motion gap to consider (px)
+            KDE_samples: Number of samples for KDE
+            percentile: Percentile for KDE
+        """
 
         class KDE:
             """Kernel Density Estimation class."""
@@ -711,6 +722,8 @@ class FeatureTracker(ABC):
             slp_folder (str or Path): Path to folder containing .slp files
             video_folder (str or Path): Path to folder containing corresponding video files
             output_dir (str or Path): Directory to save the joblib files
+            max_motion_gap: Maximum motion gap to consider (px)
+            short_distance_threshold: Threshold to split long and short distance sequences (px)
 
         Returns:
             tuple: Paths to the generated long and short KDE joblib files
@@ -912,12 +925,10 @@ class FeatureTracker(ABC):
         confidence_vector,
         max_instances,
         n_neighbors,
-        radius,
         n_components,
     ):
         """Run KNN on features and confidence vector."""
-
-        knn = NearestNeighbors(n_neighbors=n_neighbors, radius=radius, metric="cosine")
+        knn = NearestNeighbors(n_neighbors=n_neighbors, metric="cosine")
         knn.fit(X)
         distances, indices = knn.kneighbors(X)
 
@@ -1423,6 +1434,13 @@ class RFIDFeatureTracker(FeatureTracker):
             output_path: Path to save tracking results
             rfid_pings_path: Path to RFID ping data
             method: Tracking method to use - either "bbox" or "motion" (default: "bbox")
+            iou_thresh (float, optional): IOU threshold for tracklet extraction. If an instance is within this threshold across two frames a tracklet is created. Lower values create more strict tracklets. Used for bounding box method only.Defaults to 0.3.
+
+
+            dist_thresh (float, optional): Distance threshold for tracklet extraction. If the distance between two instances in the same frame is less than this value, NO tracklet is created. Used for bounding box method only. Defaults to 30.
+            KDE_samples (int, optional): Number of samples for KDE estimation. Used for motion model method only. Defaults to 100000.
+            window_size (int, optional): Frame window to look for a matching instance to an RFID ping. Defaults to 5.
+            percentile (int, optional): Percentile for KDE thresholding. Used for motion model method only. Defaults to 95.
         """
         with h5py.File(self.heatmaps_path, "r") as f:
 
@@ -1550,8 +1568,9 @@ class FurColorFeatureTracker(FeatureTracker):
         pose_percentage_threshold,
         output_features_path=None,
     ):
-        skeleton_length = len(labels.skeleton)
         """Extract features from labels."""
+        skeleton_length = len(labels.skeleton)
+        # Initialize arrays to store patches and frequencies
         patches = np.full(
             (n_frames, n_tracks, skeleton_length, patch_size, patch_size, 1), -1
         )
@@ -1604,7 +1623,6 @@ class FurColorFeatureTracker(FeatureTracker):
         patch_size: int = 5,
         pose_percentage_threshold: float = 0.6,
         n_neighbors: int = 5,
-        radius: float = 0.5,
         max_instances: int = 2,
         n_components: int = 10,
         percentile: int = 95,
@@ -1643,7 +1661,7 @@ class FurColorFeatureTracker(FeatureTracker):
 
         G, X, Z = self.run_pca(freqs, confidence_vector, max_instances, n_tracks)
         G_mapped = self.run_knn(
-            X, G, Z, confidence_vector, max_instances, n_neighbors, radius, n_components
+            X, G, Z, confidence_vector, max_instances, n_neighbors, n_components
         )
 
         tracklet_id_pairs = self.get_tracklet_id_pairs_from_knn(
@@ -1839,7 +1857,7 @@ class TailTattooFeatureTracker(FeatureTracker):
 
                 # Skip zero-length segments
                 if length < 1:
-                    curr_segments.append(None)
+                    normalized_segments.append(None)
                     continue
 
                 # Calculate corners of the bounding box
@@ -1886,6 +1904,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         return normalized_segments
 
     def smooth_tail(self, segment, weight_power=2, black_threshold=90, gap_threshold=3):
+        """Smooth a tail segment and generate a barcode by applying weighted averaging."""
         segment = np.asarray(segment)
         smoothed = np.zeros_like(segment, dtype=np.float32)
 
@@ -2094,6 +2113,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         return df
 
     def knn(self, results_df, n_neighbors=150):
+        """Filter results_df using kNN to keep only points that have all their k neighbors in the same cluster."""
         # Use the PCA columns and cluster labels from results_df for kNN
         pca_cols = [col for col in results_df.columns if col.startswith("PC")]
         X = results_df[pca_cols].values
@@ -2122,6 +2142,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         return filtered_df
 
     def get_G_mapped(self, filtered_df, num_frames, num_tracks):
+        """Map frame and pose indices to cluster labels."""
         G_mapped = pd.DataFrame(np.full((num_frames, num_tracks), -1))
 
         for row_ind, row in filtered_df.iterrows():
@@ -2161,7 +2182,6 @@ class TailTattooFeatureTracker(FeatureTracker):
         brightness: int = 40,
         max_instances: int = None,
         n_neighbors: int = 10,
-        radius: float = 10,
         n_components: int = 6,
         all_instances: bool = False,
     ):
@@ -2187,7 +2207,6 @@ class TailTattooFeatureTracker(FeatureTracker):
             brightness (int, optional): Brightness factor for adjusting tail segment appearance. Defaults to 40.
             max_instances (int, optional): Maximum number of instances to track. Defaults to None (all).
             n_neighbors (int, optional): Number of neighbors for kNN filtering. Defaults to 10.
-            radius (float, optional): Radius parameter for spatial filtering. Used for motion model method only. Defaults to 10.
             n_components (int, optional): Number of PCA components for feature analysis. Defaults to 6.
             all_instances (bool, optional): Whether to analyze all instances. Defaults to False.
 
@@ -2233,6 +2252,31 @@ class TailTattooFeatureTracker(FeatureTracker):
         print("running knn")
 
         filtered_df = self.knn(results_df, n_neighbors=n_neighbors)
+        # INSERT_YOUR_CODE
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(8, 6))
+        unique_clusters = filtered_df["Cluster"].unique()
+        colors = plt.cm.get_cmap("tab10", len(unique_clusters))
+
+        for idx, cluster in enumerate(unique_clusters):
+            cluster_df = filtered_df[filtered_df["Cluster"] == cluster]
+            plt.scatter(
+                cluster_df["PC1"],
+                cluster_df["PC2"],
+                label=cluster,
+                alpha=0.7,
+                color=colors(idx),
+                edgecolor="k",
+                s=40,
+            )
+
+        plt.xlabel("PC1")
+        plt.ylabel("PC2")
+        plt.title("Filtered PCA Clusters (after kNN)")
+        plt.legend(title="Cluster")
+        plt.tight_layout()
+        plt.show()
         G_mapped = self.get_G_mapped(filtered_df, n_frames, n_tracks)
 
         print(G_mapped[0][0])
