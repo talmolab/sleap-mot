@@ -1705,9 +1705,8 @@ class TailTattooFeatureTracker(FeatureTracker):
     def get_tail_segments(
         self, tail_nodes, lf: sio.LabeledFrame, angle_threshold_degrees=50
     ):
-        """
-        Extract tail segments from a labeled frame, but return None if any angle between consecutive segments
-        exceeds the given angle threshold (in degrees).
+        """Extract tail segments from a labeled frame.
+        Return None if any angle between consecutive segments exceeds the given angle threshold (in degrees).
         """
         tail_data = []  # {instance: [{start, end, magnitude, direction}]}
         angle_threshold = np.deg2rad(angle_threshold_degrees)
@@ -1819,6 +1818,7 @@ class TailTattooFeatureTracker(FeatureTracker):
 
         Args:
             lf: LabeledFrame containing the image and tracking data
+            tail_nodes: List of node names corresponding to the tail
             width: Width of the bounding boxes
             contrast: Contrast adjustment factor
             brightness: Brightness adjustment
@@ -1988,6 +1988,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         all_instances=False,
     ):
         """Collect tail segments across multiple frames and convert to feature vectors.
+
         Each track's tail segments are concatenated horizontally before being flattened.
 
         Returns:
@@ -2052,10 +2053,15 @@ class TailTattooFeatureTracker(FeatureTracker):
         """Perform PCA and KMeans clustering analysis on tail segments.
 
         Args:
-            start_frame: First frame to analyze
-            num_frames: Number of frames to analyze
+            labels: SLEAP labels object
+            tail_nodes: List of node names corresponding to the tail
             n_components: Number of PCA components to keep
             n_clusters: Number of KMeans clusters
+            fixed_length: Length to which tail segments are resampled (px)
+            width: Width parameter for tail cropping (px)
+            contrast: Contrast factor for adjusting tail segment appearance
+            brightness: Brightness factor for adjusting tail segment appearance
+            all_instances: If True, requires all instances to be present in a frame to analyze the tail markings of any of them. Defaults to False.
         """
         # Collect features
         features, frame_ids, pose_inds = self.collect_tail_features(
@@ -2185,8 +2191,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         n_components: int = 6,
         all_instances: bool = False,
     ):
-        """
-        Perform feature-based tracking on SLEAP labels using a combination of tail appearance and spatial information.
+        """Perform feature-based tracking on SLEAP labels using a combination of tail appearance and spatial information.
 
         This method processes the input labels and video to extract tracklets, analyze tail markings,
         filter features using k-nearest neighbors, and assign consistent track IDs across frames.
@@ -2208,12 +2213,11 @@ class TailTattooFeatureTracker(FeatureTracker):
             max_instances (int, optional): Maximum number of instances to track. Defaults to None (all).
             n_neighbors (int, optional): Number of neighbors for kNN filtering. Defaults to 10.
             n_components (int, optional): Number of PCA components for feature analysis. Defaults to 6.
-            all_instances (bool, optional): Whether to analyze all instances. Defaults to False.
+            all_instances (bool, optional): If True, requires all instances to be present in a frame to analyze the tail markings of any of them. Defaults to False.
 
         Returns:
             None. The function processes the data and assigns track IDs in-place.
         """
-
         print("loading Labels")
 
         labels = self.load_and_preprocess_labels(labels, video_path)
