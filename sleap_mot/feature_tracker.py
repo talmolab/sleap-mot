@@ -1706,6 +1706,7 @@ class TailTattooFeatureTracker(FeatureTracker):
         self, tail_nodes, lf: sio.LabeledFrame, angle_threshold_degrees=50
     ):
         """Extract tail segments from a labeled frame.
+
         Return None if any angle between consecutive segments exceeds the given angle threshold (in degrees).
         """
         tail_data = []  # {instance: [{start, end, magnitude, direction}]}

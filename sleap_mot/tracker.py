@@ -602,7 +602,7 @@ class Tracker:
         return closest_instance
 
     def resolve_track_id(self, lf, labels):
-        """uses basic tracking to resolve track IDs for instances that don't have a track ID."""
+        """Uses basic tracking to resolve track IDs for instances that don't have a track ID."""
         curr_track_names = [
             inst.track.name
             for inst in lf.instances
