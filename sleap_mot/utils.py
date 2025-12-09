@@ -147,7 +147,7 @@ def compute_oks(
 
 
 def get_pairwise_distance(pose_a, pose_b):
-    """calculate the pairwise distance between two poses."""
+    """Calculate the pairwise distance between two poses."""
     a = np.asarray(pose_a)
     b = np.asarray(pose_b)
 

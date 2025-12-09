@@ -2237,7 +2237,6 @@ class TailTattooFeatureTracker(FeatureTracker):
         Returns:
             None. The function processes the data and assigns track IDs in-place.
         """
-
         labels = self.load_and_preprocess_labels(labels, video_path)
         trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
 
