@@ -77,9 +77,7 @@ class FeatureTracker(ABC):
     def load_and_preprocess_labels(self, labels: sio.Labels, video_path: str):
         """Load and preprocess SLEAP labels."""
         # Replace video paths
-        labels.replace_filenames(
-            prefix_map={labels.videos[0].filename : video_path}
-        )
+        labels.replace_filenames(prefix_map={labels.videos[0].filename: video_path})
 
         # Convert instances to PredictedInstance
         # n_frames = labels.video.shape[0]
@@ -648,7 +646,9 @@ class FeatureTracker(ABC):
         labels = sio.load_file(slp_file)
         labels.replace_filenames(
             prefix_map={
-                str(Path(labels.videos[0].backend_metadata["filename"]).parent): str(Path(video_file).parent)
+                str(Path(labels.videos[0].backend_metadata["filename"]).parent): str(
+                    Path(video_file).parent
+                )
             }
         )
 
@@ -1234,7 +1234,9 @@ class RFIDFeatureTracker(FeatureTracker):
         first_slp = sio.load_file(file_pairs[0]["slp"])
         first_slp.replace_filenames(
             prefix_map={
-                str(Path(first_slp.videos[0].backend_metadata["filename"]).parent): str(Path(file_pairs[0]["video"]).parent)
+                str(Path(first_slp.videos[0].backend_metadata["filename"]).parent): str(
+                    Path(file_pairs[0]["video"]).parent
+                )
             }
         )
 
@@ -1260,7 +1262,9 @@ class RFIDFeatureTracker(FeatureTracker):
                 slp = sio.load_file(pair["slp"])
                 slp.replace_filenames(
                     prefix_map={
-                        str(Path(slp.videos[0].backend_metadata["filename"]).parent): str(Path(pair["video"]).parent)
+                        str(
+                            Path(slp.videos[0].backend_metadata["filename"]).parent
+                        ): str(Path(pair["video"]).parent)
                     }
                 )
                 video = slp.videos[0]
@@ -1335,7 +1339,9 @@ class RFIDFeatureTracker(FeatureTracker):
 
             # Add metadata
             f.attrs["body_nodes"] = str(body_nodes)
-            f.attrs["camera_filter"] = camera_filter if camera_filter is not None else ""
+            f.attrs["camera_filter"] = (
+                camera_filter if camera_filter is not None else ""
+            )
             f.attrs["video_number_filter"] = (
                 video_number_filter if video_number_filter is not None else -1
             )

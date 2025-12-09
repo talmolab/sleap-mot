@@ -145,6 +145,7 @@ def compute_oks(
 
     return oks
 
+
 def get_pairwise_distance(pose_a, pose_b):
     """calculate the pairwise distance between two poses."""
     a = np.asarray(pose_a)
@@ -208,6 +209,7 @@ def get_centroid(pred_instance: sio.PredictedInstance | np.ndarray):
     centroid = np.nanmedian(pts, axis=0)
     return centroid
 
+
 def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
     """Return the bounding box coordinates for the `PredictedInstance` object."""
     points = pred_instance.numpy()
@@ -217,6 +219,7 @@ def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
     x_max = np.max(points[:, 0])
     y_max = np.max(points[:, 1])
     return x_min, y_min, x_max, y_max
+
 
 def get_bbox_circle(pred_instance: sio.PredictedInstance | np.ndarray):
     """Return the bounding box coordinates for the `PredictedInstance` object."""
@@ -242,6 +245,7 @@ def get_bbox_circle(pred_instance: sio.PredictedInstance | np.ndarray):
 def compute_euclidean_distance(a, b):
     """Return the negative euclidean distance between a and b points."""
     return -np.linalg.norm(a - b)
+
 
 def get_bbox_centroid(bbox):
     """Return the centroid of the bounding box."""

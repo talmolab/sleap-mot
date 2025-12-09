@@ -159,7 +159,7 @@ def get_metrics(
                 seen_gt_in_frame.add(gt_id)
 
             # Existing per-identity correctness tallies (optionally ignore None when none_tracks is True)
-            correct_id = (gt_id == pred_id)
+            correct_id = gt_id == pred_id
             if not (none_tracks and pred_id is None):
                 if not correct_id:
                     total_mislabeled_identities += 1
