@@ -78,7 +78,7 @@ class FeatureTracker(ABC):
         """Load and preprocess SLEAP labels."""
         # Replace video paths
         labels.replace_filenames(
-            prefix_map={labels.videos[0].backend_metadata["filename"]: video_path}
+            prefix_map={labels.videos[0].filename : video_path}
         )
 
         # Convert instances to PredictedInstance
@@ -648,9 +648,7 @@ class FeatureTracker(ABC):
         labels = sio.load_file(slp_file)
         labels.replace_filenames(
             prefix_map={
-                Path(labels.videos[0].backend_metadata["filename"])
-                .parent: Path(video_file)
-                .parent
+                str(Path(labels.videos[0].backend_metadata["filename"]).parent): str(Path(video_file).parent)
             }
         )
 
@@ -713,7 +711,7 @@ class FeatureTracker(ABC):
         slp_folder,
         video_folder,
         output_dir="./",
-        max_motion_gap=80,
+        max_motion_gap=400,
         short_distance_threshold=80,
     ):
         """Generate long and short distance KDE motion models from SLEAP tracking data.
@@ -763,7 +761,7 @@ class FeatureTracker(ABC):
 
         # Process each file pair
         print("Processing motion sequences...")
-        for pair in file_pairs:
+        for pair in tqdm.tqdm(file_pairs):
             # Load and process the SLP file
             slp_file = pair["slp"]
             video_file = pair["video"]
@@ -777,7 +775,7 @@ class FeatureTracker(ABC):
             idle_count += curr_idle_count
             motion_count += curr_motion_count
 
-        print(f"Found {len(motion_sequences)} total motion sequences across all videos")
+        # print(f"Found {len(motion_sequences)} total motion sequences across all videos")
         print(f"Idle sequences: {idle_count}, Motion sequences: {motion_count}")
 
         # Calculate total sequences across all videos
@@ -824,6 +822,24 @@ class FeatureTracker(ABC):
         print(
             f"Long sequences: {len(long_sequences)}, Short sequences: {len(short_sequences)}"
         )
+
+        if len(long_sequences) == 0 or len(short_sequences) == 0:
+            error_msg = (
+                f"Cannot generate KDE models: "
+                f"Long sequences: {len(long_sequences)}, Short sequences: {len(short_sequences)}.\n"
+            )
+            if len(long_sequences) == 0:
+                error_msg += (
+                    f"No long-distance sequences found (movements > {short_distance_threshold}px). "
+                    f"Try decreasing the 'short_distance_threshold' parameter (current: {short_distance_threshold}px). "
+                    f"Typical values: 40-100px depending on your video resolution and animal movement patterns.\n"
+                )
+            if len(short_sequences) == 0:
+                error_msg += (
+                    f"No short-distance sequences found (movements <= {short_distance_threshold}px). "
+                    f"Try increasing the 'short_distance_threshold' parameter (current: {short_distance_threshold}px).\n"
+                )
+            raise ValueError(error_msg)
 
         # Create long distance KDE
         print("Creating long distance KDE...")
@@ -1218,9 +1234,7 @@ class RFIDFeatureTracker(FeatureTracker):
         first_slp = sio.load_file(file_pairs[0]["slp"])
         first_slp.replace_filenames(
             prefix_map={
-                Path(first_slp.videos[0].backend_metadata["filename"])
-                .parent: Path(file_pairs[0]["video"])
-                .parent
+                str(Path(first_slp.videos[0].backend_metadata["filename"]).parent): str(Path(file_pairs[0]["video"]).parent)
             }
         )
 
@@ -1238,17 +1252,15 @@ class RFIDFeatureTracker(FeatureTracker):
         # Generate heatmaps for each unit
         plots_by_unit = []
 
-        for rfid_unit_label in unique_units:
+        for rfid_unit_label in tqdm.tqdm(unique_units):
             curr_plots = []
 
-            for pair in file_pairs:
+            for pair in tqdm.tqdm(file_pairs):
 
                 slp = sio.load_file(pair["slp"])
                 slp.replace_filenames(
                     prefix_map={
-                        Path(slp.videos[0].backend_metadata["filename"])
-                        .parent: Path(pair["video"])
-                        .parent
+                        str(Path(slp.videos[0].backend_metadata["filename"]).parent): str(Path(pair["video"]).parent)
                     }
                 )
                 video = slp.videos[0]
@@ -1323,7 +1335,7 @@ class RFIDFeatureTracker(FeatureTracker):
 
             # Add metadata
             f.attrs["body_nodes"] = str(body_nodes)
-            f.attrs["camera_filter"] = camera_filter
+            f.attrs["camera_filter"] = camera_filter if camera_filter is not None else ""
             f.attrs["video_number_filter"] = (
                 video_number_filter if video_number_filter is not None else -1
             )
@@ -2219,7 +2231,6 @@ class TailTattooFeatureTracker(FeatureTracker):
         Returns:
             None. The function processes the data and assigns track IDs in-place.
         """
-        print("loading Labels")
 
         labels = self.load_and_preprocess_labels(labels, video_path)
         trx, track_names, iou_per_pose = self.extract_tracking_data(labels)
@@ -2253,8 +2264,6 @@ class TailTattooFeatureTracker(FeatureTracker):
             brightness=brightness,
             all_instances=all_instances,
         )
-
-        print("running knn")
 
         filtered_df = self.knn(results_df, n_neighbors=n_neighbors)
         # INSERT_YOUR_CODE

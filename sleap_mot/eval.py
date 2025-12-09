@@ -3,6 +3,7 @@
 import numpy as np
 import motmetrics as mm
 import pandas as pd
+from collections import defaultdict
 
 
 def get_df(df, track_key):
@@ -107,39 +108,65 @@ def get_metrics(
     all_track_ids = set(df_merged["gt_track_id"].unique()) | set(
         df_merged["pred_track_id"].unique()
     )
-    track_id_map = {track_id: i for i, track_id in enumerate(all_track_ids)}
+    # track_id_map = {track_id: i for i, track_id in enumerate(all_track_ids)}
+    # Per-GT sequence of predicted IDs, one entry per frame the GT is visible (in time order)
+    pred_sequence_by_gt = defaultdict(list)
+    frames_by_gt = defaultdict(list)
+
+    # Switch counts per GT (count a switch whenever the predicted ID changes between successive appearances)
+    id_switches_by_gt = defaultdict(int)
+
+    def _valid_id(x):
+        return (x is not None) and (not pd.isna(x))
 
     # Process each frame in the merged dataframe, limiting to first 10,000 frames
-    for frame, framedf in df_merged.groupby("frame_id"):
+    for frame, framedf in df_merged.sort_values("frame_id").groupby("frame_id"):
         if max_frames is not None and frame > max_frames:
             break
         # Get ground truth and predicted track IDs for this frame
         gt_ids = framedf["gt_track_id"].values
         pred_tracks = framedf["pred_track_id"].values
 
+        # De-dupe per frame so each GT contributes at most once per frame
+        seen_gt_in_frame = set()
+
         # Check for any mismatches between ground truth and predictions
         for idx, gt_id in enumerate(gt_ids):
-            correct_id = True
             pred_id = pred_tracks[idx]
             if track_dict is not None and pred_id in track_dict:
                 pred_tracks[idx] = track_dict[pred_id]
                 pred_id = pred_tracks[idx]
-            if gt_id != pred_id:
-                correct_id = False
 
-            if none_tracks:
-                if pred_id is None:
-                    continue
+            # Build the per-GT sequence (one value per frame the GT is visible)
+            if _valid_id(gt_id) and gt_id not in seen_gt_in_frame:
+                seq = pred_sequence_by_gt[gt_id]
 
-            if not correct_id:
-                # print(
-                #     f"Mislabeled frame {frame} with gt_id {gt_id} and pred_id {pred_id}"
-                # )
-                total_mislabeled_identities += 1
-                mislabeled_frames.append(frame)
-            else:
-                total_correct_identities += 1
-                correct_frames.append(frame)
+                # Count a switch if current pred_id differs from previous for this GT
+                if len(seq) > 0:
+                    prev = seq[-1]
+                    if none_tracks:
+                        # Ignore transitions involving None when none_tracks is True
+                        if _valid_id(prev) and _valid_id(pred_id) and pred_id != prev:
+                            id_switches_by_gt[gt_id] += 1
+                    else:
+                        # Count all changes, including to/from None
+                        if pred_id != prev:
+                            id_switches_by_gt[gt_id] += 1
+
+                # Append current prediction (including None, so the list indexes correspond to appearances)
+                seq.append(pred_id)
+                frames_by_gt[gt_id].append(frame)
+                seen_gt_in_frame.add(gt_id)
+
+            # Existing per-identity correctness tallies (optionally ignore None when none_tracks is True)
+            correct_id = (gt_id == pred_id)
+            if not (none_tracks and pred_id is None):
+                if not correct_id:
+                    total_mislabeled_identities += 1
+                    mislabeled_frames.append(frame)
+                else:
+                    total_correct_identities += 1
+                    correct_frames.append(frame)
 
         # current_track_ids = set(gt_ids) | set(pred_tracks)
         # for track_id in current_track_ids:
@@ -191,6 +218,7 @@ def get_metrics(
     # summary = mh.compute(acc, name="acc").transpose()
 
     # Group consecutive mislabeled frames to analyze error patterns
+    total_id_switches_gt_anchored = int(sum(id_switches_by_gt.values()))
     grouped_mislabeled_frames = []
     mislabeled_group_lengths = []
     current_group = None
@@ -246,4 +274,8 @@ def get_metrics(
         "grouped_correct_frames": grouped_correct_frames,
         "group_lengths_correct": group_lengths_correct,
         "mean_correct_length": mean_correct_length,
+        "id_switches_by_gt": dict(id_switches_by_gt),
+        "total_id_switches_gt_anchored": total_id_switches_gt_anchored,
+        "pred_sequence_by_gt": dict(pred_sequence_by_gt),
+        "frames_by_gt": dict(frames_by_gt),
     }

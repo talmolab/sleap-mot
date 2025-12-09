@@ -145,6 +145,25 @@ def compute_oks(
 
     return oks
 
+def get_pairwise_distance(pose_a, pose_b):
+    """calculate the pairwise distance between two poses."""
+    a = np.asarray(pose_a)
+    b = np.asarray(pose_b)
+
+    if a.shape != b.shape:
+        raise ValueError(f"Poses must have the same shape, got {a.shape} vs {b.shape}")
+
+    # Compute distance only for non-NaN points (ignore nan keypoints)
+    is_valid = ~np.logical_or(np.isnan(a).any(axis=-1), np.isnan(b).any(axis=-1))
+    if not np.any(is_valid):
+        # No valid keypoints, return large value
+        return np.inf
+
+    dists = np.linalg.norm(a[is_valid] - b[is_valid], axis=1)
+
+    # Take the mean distance of all valid keypoints (or you may choose sum/min/max as appropriate)
+    return np.mean(dists)
+
 
 def hungarian_matching(cost_matrix: np.ndarray) -> list[tuple[int, int]]:
     """Match new instances to existing tracks using Hungarian matching."""
@@ -189,8 +208,17 @@ def get_centroid(pred_instance: sio.PredictedInstance | np.ndarray):
     centroid = np.nanmedian(pts, axis=0)
     return centroid
 
-
 def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
+    """Return the bounding box coordinates for the `PredictedInstance` object."""
+    points = pred_instance.numpy()
+    points = points[~np.isnan(points).any(axis=1)]
+    x_min = np.min(points[:, 0])
+    y_min = np.min(points[:, 1])
+    x_max = np.max(points[:, 0])
+    y_max = np.max(points[:, 1])
+    return x_min, y_min, x_max, y_max
+
+def get_bbox_circle(pred_instance: sio.PredictedInstance | np.ndarray):
     """Return the bounding box coordinates for the `PredictedInstance` object."""
     points = pred_instance.numpy()
     points = points[~np.isnan(points).any(axis=1)]
@@ -214,6 +242,10 @@ def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
 def compute_euclidean_distance(a, b):
     """Return the negative euclidean distance between a and b points."""
     return -np.linalg.norm(a - b)
+
+def get_bbox_centroid(bbox):
+    """Return the centroid of the bounding box."""
+    return np.nanmean(bbox, axis=0)
 
 
 def compute_iou(a, b):
