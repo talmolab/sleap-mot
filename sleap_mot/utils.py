@@ -218,7 +218,7 @@ def get_bbox(pred_instance: sio.PredictedInstance | np.ndarray):
     y_min = np.min(points[:, 1])
     x_max = np.max(points[:, 0])
     y_max = np.max(points[:, 1])
-    return x_min, y_min, x_max, y_max
+    return (x_min, y_min), (x_max, y_max)
 
 
 def get_bbox_circle(pred_instance: sio.PredictedInstance | np.ndarray):

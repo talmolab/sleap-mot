@@ -6,10 +6,12 @@ tracker has higher priority than the existing assignment.
 
 Classes
 -------
-IdTrackObject
+TrackContext
     Wrapper for tracks with priority information.
-IdTrackLayer
+TrackingLayer
     Abstract base class for all tracking layers.
+ConflictResolutionState
+    State object for tracking conflict resolution.
 DeduplicatePose
     Remove duplicate poses within frames.
 RFIDTracker
@@ -19,7 +21,7 @@ FurColorTracker
 """
 
 # Base classes
-from .base import IdTrackObject, IdTrackLayer
+from .base import TrackContext, TrackingLayer, ConflictResolutionState
 
 # Concrete implementations
 # (Uncomment as you create each module)
@@ -29,8 +31,9 @@ from .base import IdTrackObject, IdTrackLayer
 
 __all__ = [
     # Base classes
-    "IdTrackObject",
-    "IdTrackLayer",
+    "TrackContext",
+    "TrackingLayer",
+    "ConflictResolutionState",
     # Implementations
     # "DeduplicatePose",
     # "RFIDTracker",

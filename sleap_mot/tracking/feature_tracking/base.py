@@ -1,13 +1,16 @@
-from sleap_mot.tracking.base import IdTrackLayer
+from sleap_mot.tracking.base import TrackingLayer
 import numpy as np
 import sleap_io as sio
 from abc import ABC, abstractmethod
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
+from sleap_mot.tracking.base import TrackContext
+
+from typing import Optional
 
 
-class FeatureTracker(IdTrackLayer, ABC):
+class FeatureTracker(TrackingLayer, ABC):
     """Abstract base class for feature-based tracking algorithms in SLEAP-MOT.
 
     This class defines the interface and common utilities for implementing
@@ -104,7 +107,7 @@ class FeatureTracker(IdTrackLayer, ABC):
         return G_mapped
 
     def get_current_tracklets(self, labels):
-        tracklets = []
+        tracklets = {}
         for lf in labels:
             for instance_idx, inst in enumerate(lf.instances):
                 if inst.track is not None:
@@ -132,12 +135,27 @@ class FeatureTracker(IdTrackLayer, ABC):
                 if best_rfid_name is not None:
                     track_id_list.append(best_rfid_name)
 
-
-
     def assign_track_ids(self, probabilities_df, labels, tracklets):
         if self.only_apply_to_tracklets:
+            pass
 
-        
+    def get_track_context(self, labels, frame_idx, track) -> Optional[TrackContext]:
+        pass
+
+    def has_track_in_frame(self, labels, frame_idx, track) -> bool:
+        pass
+
+    def get_instance_with_track(self, labels, frame_idx, track) -> Optional[int]:
+        pass
+
+    def assign_track(self, labels, frame_idx, instance_idx, track, track_context) -> None:
+        pass
+
+    def remove_track(self, labels, frame_idx, instance_idx) -> None:
+        pass
+
+    def get_next_frame(self, labels, current_frame, direction) -> Optional[int]:
+        pass
 
     @abstractmethod
     def track(self, *args, **kwargs):

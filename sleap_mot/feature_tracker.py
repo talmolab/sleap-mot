@@ -42,6 +42,7 @@ import cv2
 from collections import defaultdict
 from scipy.stats import zscore
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
 from sleap_mot.utils import (
     get_bbox,
@@ -50,7 +51,6 @@ from sleap_mot.utils import (
     check_bbox_overlap,
     rotate_points,
 )
-
 
 class FeatureTracker(ABC):
     """Abstract base class for feature-based tracking algorithms in SLEAP-MOT.
@@ -205,7 +205,7 @@ class FeatureTracker(ABC):
 
         # Get bounding box for input pose
         if pose_instance is not None:
-            x0y0_pose, x1y1_pose = get_bbox(pose_instance)
+            (x_min, y_min), (x_max, y_max) = get_bbox(pose_instance)
 
             # Compare with other poses in same frame
             frame_labels = labels[frame_idx]
@@ -214,11 +214,11 @@ class FeatureTracker(ABC):
                     continue
 
                 # Get bounding box for other pose
-                x0y0_other, x1y1_other = get_bbox(other_instance)
+                (x_min, y_min), (x_max, y_max) = get_bbox(other_instance)
 
                 # Calculate centers of bounding boxes
-                center_pose = (x0y0_pose + x1y1_pose) / 2
-                center_other = (x0y0_other + x1y1_other) / 2
+                center_pose = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
+                center_other = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
 
                 # Calculate displacement between centers
                 displacement = np.linalg.norm(center_pose - center_other)
@@ -2271,8 +2271,6 @@ class TailTattooFeatureTracker(FeatureTracker):
         )
 
         filtered_df = self.knn(results_df, n_neighbors=n_neighbors)
-        # INSERT_YOUR_CODE
-        import matplotlib.pyplot as plt
 
         plt.figure(figsize=(8, 6))
         unique_clusters = filtered_df["Cluster"].unique()
