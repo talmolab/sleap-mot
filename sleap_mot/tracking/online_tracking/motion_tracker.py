@@ -607,3 +607,559 @@ class MotionTracker(OnlineTrackingLayer):
             max_match_distance=None,
             **kwargs
         )
+
+
+# =============================================================================
+# Directional Motion Tracker
+# =============================================================================
+
+
+def get_facing_direction(instance: sio.PredictedInstance) -> Optional[np.ndarray]:
+    """Get the direction the animal is facing from pose keypoints.
+
+    Uses the Nose-Tailbase vector to determine the direction the animal
+    is facing, independent of its movement. This provides stable direction
+    estimation even when the animal is stationary.
+
+    Keypoint indices (anatomical order for mice):
+        0: Nose
+        1: Head
+        2: Upper_back
+        3: Lower_back
+        4: Tailbase
+
+    Args:
+        instance: PredictedInstance with keypoints
+
+    Returns:
+        Unit vector pointing in the direction the animal is facing,
+        or None if required keypoints are missing.
+    """
+    pts = instance.numpy()
+
+    # Primary method: Nose (0) to Tailbase (4)
+    if pts.shape[0] > 4:
+        nose = pts[0]
+        tailbase = pts[4]
+
+        if not np.any(np.isnan(nose)) and not np.any(np.isnan(tailbase)):
+            direction = nose - tailbase
+            magnitude = np.linalg.norm(direction)
+            if magnitude > 1e-6:
+                return direction / magnitude
+
+    # Fallback 1: Head (1) to Lower_back (3)
+    if pts.shape[0] > 3:
+        head = pts[1]
+        lower_back = pts[3]
+
+        if not np.any(np.isnan(head)) and not np.any(np.isnan(lower_back)):
+            direction = head - lower_back
+            magnitude = np.linalg.norm(direction)
+            if magnitude > 1e-6:
+                return direction / magnitude
+
+    # Fallback 2: Use first and last valid keypoints
+    valid_pts = pts[~np.any(np.isnan(pts), axis=1)]
+    if len(valid_pts) >= 2:
+        direction = valid_pts[0] - valid_pts[-1]
+        magnitude = np.linalg.norm(direction)
+        if magnitude > 1e-6:
+            return direction / magnitude
+
+    return None
+
+
+def directional_motion_model(
+    p2: np.ndarray, p3: np.ndarray, facing_dir: np.ndarray
+) -> Tuple[float, Tuple[float, float]]:
+    """Motion model using pose-based facing direction.
+
+    Transforms candidate position p3 to a coordinate system aligned with
+    the facing direction of the animal.
+
+    In the transformed space:
+    - Origin is at p2 (previous position)
+    - Positive Y-axis points in the facing direction
+    - X-axis is perpendicular (lateral movement)
+
+    Args:
+        p2: Centroid at frame t-1 (previous frame)
+        p3: Centroid at frame t (candidate)
+        facing_dir: Unit vector of facing direction at frame t-1
+
+    Returns:
+        Tuple of (theta, p3_hat) where:
+            - theta: Rotation angle applied
+            - p3_hat: Transformed position of p3 in facing-aligned coordinates
+    """
+    # Translate p3 relative to p2 (p2 at origin)
+    p3_rel = (p3[0] - p2[0], p3[1] - p2[1])
+
+    # Compute rotation to align backwards direction with negative y-axis
+    # (equivalent to aligning forward direction with positive y-axis)
+    backwards_dir = (-facing_dir[0], -facing_dir[1])
+    theta = math.atan2(-backwards_dir[0], backwards_dir[1])
+
+    # Rotate p3 to aligned coordinates
+    p3_hat = rotate_points(p3_rel, theta)
+
+    return theta, p3_hat
+
+
+def compute_directional_alignment(
+    facing_direction: np.ndarray,
+    movement_vector: np.ndarray,
+) -> Tuple[float, float, bool, bool, bool]:
+    """Compute alignment between facing direction and movement.
+
+    Args:
+        facing_direction: Unit vector of facing direction
+        movement_vector: Vector from p2 to p3
+
+    Returns:
+        Tuple of (dot_product, angle_degrees, is_forward, is_backward, is_lateral)
+    """
+    movement_distance = np.linalg.norm(movement_vector)
+
+    if movement_distance < 1e-6:
+        # No movement - consider as aligned (neutral)
+        return 1.0, 0.0, True, False, False
+
+    # Normalize movement vector
+    movement_direction = movement_vector / movement_distance
+
+    # Dot product: 1 = same direction, -1 = opposite, 0 = perpendicular
+    dot_product = np.dot(facing_direction, movement_direction)
+
+    # Clamp to [-1, 1] for numerical stability
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+
+    # Angle between vectors
+    angle_rad = math.acos(dot_product)
+    angle_deg = math.degrees(angle_rad)
+
+    # Classification
+    is_forward = angle_deg < 90  # Moving in facing direction
+    is_backward = angle_deg > 90  # Moving against facing direction
+    is_lateral = 45 < angle_deg < 135  # Moving perpendicular
+
+    return dot_product, angle_deg, is_forward, is_backward, is_lateral
+
+
+def compute_directional_multiplier(
+    dot_product: float,
+    angle_deg: float,
+    forward_boost: float = 1.0,
+    backward_penalty: float = 0.1,
+    lateral_penalty: float = 0.5,
+    soft_threshold_angle: float = 45.0,
+) -> float:
+    """Compute a multiplier based on directional alignment.
+
+    Args:
+        dot_product: Dot product between facing and movement (-1 to 1)
+        angle_deg: Angle between facing and movement (0 to 180)
+        forward_boost: Multiplier for forward movement (default 1.0)
+        backward_penalty: Multiplier for backward movement (default 0.1)
+        lateral_penalty: Multiplier for lateral movement (default 0.5)
+        soft_threshold_angle: Angle at which penalty starts (default 45)
+
+    Returns:
+        Multiplier between backward_penalty and forward_boost
+    """
+    if angle_deg <= soft_threshold_angle:
+        # Forward movement - full score
+        return forward_boost
+    elif angle_deg >= 180 - soft_threshold_angle:
+        # Backward movement - heavy penalty
+        return backward_penalty
+    else:
+        # Transition zone - smooth interpolation
+        transition_range = 180 - 2 * soft_threshold_angle
+        progress = (angle_deg - soft_threshold_angle) / transition_range
+
+        # Smooth interpolation (cosine for smoother transition)
+        smooth_progress = (1 - math.cos(progress * math.pi)) / 2
+
+        # Interpolate between forward_boost and backward_penalty
+        return forward_boost * (1 - smooth_progress) + backward_penalty * smooth_progress
+
+
+class DirectionalKDEModel:
+    """KDE model with out-of-bounds fallback for directional motion tracking.
+
+    Unlike the basic KDEModel which returns 0 for out-of-bounds points,
+    this model provides a smooth fallback using exponential decay.
+
+    Attributes:
+        kde: The sklearn KernelDensity model
+        bounds: (x_min, x_max, y_min, y_max) bounds
+        decay_rate: Rate of exponential decay for out-of-bounds
+        min_probability: Minimum probability for out-of-bounds
+        outside_penalty: Penalty multiplier for out-of-bounds
+    """
+
+    def __init__(
+        self,
+        kde,
+        bounds: Tuple[float, float, float, float],
+        decay_rate: float = 15.0,
+        min_probability: float = 0.01,
+        outside_penalty: float = 0.3,
+    ):
+        """Initialize the directional KDE model.
+
+        Args:
+            kde: Pre-trained sklearn KernelDensity model
+            bounds: (x_min, x_max, y_min, y_max) bounds for predictions
+            decay_rate: Rate of exponential decay for out-of-bounds points
+            min_probability: Minimum probability for out-of-bounds points
+            outside_penalty: Penalty multiplier for out-of-bounds points
+        """
+        x_min, x_max, y_min, y_max = bounds
+        self.kde = kde
+        self.x_min = x_min
+        self.x_max = x_max
+        self.y_min = y_min
+        self.y_max = y_max
+        self.decay_rate = decay_rate
+        self.min_probability = min_probability
+        self.outside_penalty = outside_penalty
+
+        # Create grid of points for finding max density
+        x = np.linspace(self.x_min, self.x_max, 100)
+        y = np.linspace(self.y_min, self.y_max, 100)
+        X_grid, Y_grid = np.meshgrid(x, y)
+        xy_grid = np.vstack([X_grid.ravel(), Y_grid.ravel()]).T
+
+        # Get density values and find maximum
+        density = np.exp(kde.score_samples(xy_grid))
+        self.max_density = density.max()
+
+    def get_probability(self, point: Tuple[float, float]) -> float:
+        """Get probability density at a point with out-of-bounds fallback.
+
+        Args:
+            point: (x, y) coordinates in normalized motion space
+
+        Returns:
+            Probability between 0 and 1
+        """
+        x, y = point
+
+        # Check if point is within bounds
+        in_bounds = (
+            self.x_min <= x <= self.x_max and
+            self.y_min <= y <= self.y_max
+        )
+
+        if in_bounds:
+            # Normal KDE probability
+            point_array = np.array(point).reshape(1, -1)
+            density = np.exp(self.kde.score_samples(point_array))[0]
+            prob = density / self.max_density
+            return prob
+        else:
+            # Out-of-bounds fallback with exponential decay
+            # Compute distance to nearest bound
+            dx = max(0, self.x_min - x, x - self.x_max)
+            dy = max(0, self.y_min - y, y - self.y_max)
+            dist_outside = math.sqrt(dx * dx + dy * dy)
+
+            # Exponential decay based on distance outside bounds
+            decay = math.exp(-dist_outside / self.decay_rate)
+
+            # Compute fallback probability
+            prob = max(self.min_probability, self.outside_penalty * decay)
+            return prob
+
+
+class DirectionalMotionTracker(MotionTracker):
+    """Motion tracker using pose-based facing direction with long KDE only.
+
+    This tracker uses the animal's pose keypoints to determine facing direction
+    and applies directional penalties to movements that go against the facing
+    direction (mice don't run backwards).
+
+    Key design decisions:
+    1. Uses only long KDE - short movements use distance-based scoring
+    2. Directional penalty only applied when actually moving (not stagnant)
+    3. Smooth fallback for out-of-bounds KDE points
+
+    This eliminates the "dead zone" bug where movements between short KDE bounds
+    and selection threshold would get score=0.
+
+    Attributes:
+        kde_threshold: Movement threshold for KDE vs distance scoring
+        stagnant_threshold: Movement below which directional penalty is skipped
+        forward_boost: Score multiplier for forward movement
+        backward_penalty: Score multiplier for backward movement
+        reject_backward: Whether to hard-reject backward movements
+        backward_rejection_angle: Angle above which movement is rejected
+    """
+
+    def __init__(
+        self,
+        # KDE path (only long KDE needed)
+        long_kde_path: str,
+        # Threshold for KDE vs distance scoring
+        kde_threshold: float = 40.0,
+        # Directional penalty parameters
+        forward_boost: float = 1.0,
+        backward_penalty: float = 0.1,
+        soft_threshold_angle: float = 45.0,
+        reject_backward: bool = True,
+        backward_rejection_angle: float = 120.0,
+        # Stagnant detection
+        stagnant_threshold: float = 15.0,
+        # Max distance for matching
+        max_match_distance: float = 120.0,
+        # Thresholds for track continuation
+        min_probability_threshold: float = 0.1,
+        proximity_threshold: Optional[float] = 50.0,
+        iou_threshold: Optional[float] = 0.1,
+        # KDE model parameters
+        kde_decay_rate: float = 15.0,
+        kde_min_probability: float = 0.01,
+        kde_outside_penalty: float = 0.3,
+        kde_percentile: float = 95.0,
+        kde_samples: int = 100000,
+        # Base class params
+        priority: int = 5,
+        name: str = "DirectionalMotionTracker",
+        **kwargs,
+    ):
+        """Initialize the directional motion tracker.
+
+        Args:
+            long_kde_path: Path to long-distance KDE model (.joblib)
+            kde_threshold: Use KDE for movements >= this distance (default 40px)
+            forward_boost: Score multiplier for forward movement
+            backward_penalty: Score multiplier for backward movement
+            soft_threshold_angle: Angle at which penalty starts
+            reject_backward: If True, reject extreme backward movements
+            backward_rejection_angle: Angle above which movement is rejected
+            stagnant_threshold: Distance below which directional penalty is skipped
+            max_match_distance: Maximum distance to consider for matching
+            min_probability_threshold: Minimum probability to continue track
+            proximity_threshold: Minimum distance to other instances (None to disable)
+            iou_threshold: Maximum IoU with other instances (None to disable)
+            kde_decay_rate: Rate of exponential decay for out-of-bounds
+            kde_min_probability: Minimum probability for out-of-bounds
+            kde_outside_penalty: Penalty multiplier for out-of-bounds
+            kde_percentile: Percentile for KDE bounds computation
+            kde_samples: Number of samples for KDE bounds estimation
+            priority: Priority level for conflict resolution
+            name: Layer name for history tracking
+        """
+        # Store directional parameters
+        self.kde_threshold = kde_threshold
+        self.forward_boost = forward_boost
+        self.backward_penalty = backward_penalty
+        self.soft_threshold_angle = soft_threshold_angle
+        self.reject_backward = reject_backward
+        self.backward_rejection_angle = backward_rejection_angle
+        self.stagnant_threshold = stagnant_threshold
+        self.kde_decay_rate = kde_decay_rate
+        self.kde_min_probability = kde_min_probability
+        self.kde_outside_penalty = kde_outside_penalty
+
+        # Store KDE parameters
+        self._long_kde_path = long_kde_path
+        self._kde_percentile = kde_percentile
+        self._kde_samples = kde_samples
+
+        # Initialize directional KDE model (will be set in _load_directional_kde)
+        self.directional_kde: Optional[DirectionalKDEModel] = None
+        self._load_directional_kde()
+
+        # Call parent init
+        # Note: We pass long_kde_path as both long and short to satisfy parent,
+        # but we override compute_association_score to use our own logic
+        super().__init__(
+            priority=priority,
+            name=name,
+            long_kde_path=long_kde_path,
+            short_kde_path=long_kde_path,  # Dummy - not used
+            min_probability_threshold=min_probability_threshold,
+            proximity_threshold=proximity_threshold,
+            iou_threshold=iou_threshold,
+            max_match_distance=max_match_distance,
+            kde_percentile=int(kde_percentile),
+            kde_samples=kde_samples,
+            **kwargs,
+        )
+
+    def _load_directional_kde(self) -> None:
+        """Load the directional KDE model with fallback support."""
+        if self._long_kde_path is None:
+            return
+
+        # Load raw KDE model
+        kde_raw = joblib.load(self._long_kde_path)
+
+        # Compute bounds from samples (use fixed seed for reproducibility)
+        min_percentile = 100 - self._kde_percentile
+        max_percentile = self._kde_percentile
+
+        np.random.seed(42)
+        samples = kde_raw.sample(self._kde_samples)
+        x_vals = samples[:, 0]
+        y_vals = samples[:, 1]
+        x_min, x_max = np.percentile(x_vals, [min_percentile, max_percentile])
+        y_min, y_max = np.percentile(y_vals, [min_percentile, max_percentile])
+
+        self.directional_kde = DirectionalKDEModel(
+            kde_raw,
+            (x_min, x_max, y_min, y_max),
+            decay_rate=self.kde_decay_rate,
+            min_probability=self.kde_min_probability,
+            outside_penalty=self.kde_outside_penalty,
+        )
+
+    def compute_association_score(
+        self,
+        instance1: sio.PredictedInstance,
+        instance2: sio.PredictedInstance,
+        frame_gap: int = 1,
+        track_history: Optional[List[Tuple[int, sio.PredictedInstance]]] = None,
+        **kwargs,
+    ) -> float:
+        """Compute association score with directional penalty.
+
+        Logic:
+        1. Movement < kde_threshold: Distance-based scoring, no directional penalty
+        2. Movement >= kde_threshold: Long KDE with directional penalty
+
+        Args:
+            instance1: Instance from previous frame
+            instance2: Candidate instance from current frame
+            frame_gap: Number of frames between instances
+            track_history: Track history for context
+
+        Returns:
+            Association score (higher = better match)
+        """
+        # Get centroids
+        p2 = get_centroid(instance1)  # Previous frame (t-1)
+        p3 = get_centroid(instance2)  # Current frame (t)
+
+        if p2 is None or p3 is None:
+            return 0.0
+
+        # Compute movement
+        movement_vector = np.array(p3) - np.array(p2)
+        movement_distance = np.linalg.norm(movement_vector)
+
+        # Check max distance threshold
+        if self.max_match_distance is not None:
+            if movement_distance > self.max_match_distance:
+                return 0.0
+
+        # SHORT MOVEMENT: Use distance-based scoring
+        # For short movements, direction is unreliable - just check proximity
+        if movement_distance < self.kde_threshold:
+            return self._distance_score(movement_distance)
+
+        # LONG MOVEMENT: Use KDE + directional penalty
+        if self.directional_kde is None:
+            return self._distance_score(movement_distance)
+
+        # Get facing direction for transformation
+        facing_dir = get_facing_direction(instance1)
+
+        if facing_dir is None:
+            # No facing direction - fall back to distance
+            return self._distance_score(movement_distance)
+
+        # Apply directional penalty only if not stagnant
+        directional_multiplier = 1.0
+
+        if movement_distance > self.stagnant_threshold:
+            dot_product, alignment_angle, is_forward, is_backward, is_lateral = \
+                compute_directional_alignment(facing_dir, movement_vector)
+
+            # Hard rejection for extreme backward movement
+            if self.reject_backward and alignment_angle > self.backward_rejection_angle:
+                return 0.0
+
+            # Soft penalty
+            directional_multiplier = compute_directional_multiplier(
+                dot_product,
+                alignment_angle,
+                self.forward_boost,
+                self.backward_penalty,
+                0.5,  # lateral_penalty
+                self.soft_threshold_angle,
+            )
+
+        # Transform to facing-aligned coordinates
+        theta, p3_hat = directional_motion_model(
+            np.array(p2), np.array(p3), facing_dir
+        )
+
+        # Get probability from directional KDE
+        base_score = self.directional_kde.get_probability(p3_hat)
+
+        # Apply directional multiplier
+        return base_score * directional_multiplier
+
+    def _distance_score(self, distance: float) -> float:
+        """Compute distance-based score (closer = higher score).
+
+        Uses a simple linear falloff from 1.0 at distance=0 to 0.0 at max_match_distance.
+        """
+        if self.max_match_distance is not None and distance >= self.max_match_distance:
+            return 0.0
+        max_dist = self.max_match_distance if self.max_match_distance else 160.0
+        return 1.0 - (distance / max_dist)
+
+    @classmethod
+    def for_tracklets(
+        cls,
+        long_kde_path: str,
+        kde_threshold: float = 40.0,
+        max_match_distance: float = 130.0,
+        min_probability_threshold: float = 0.1,
+        proximity_threshold: float = 50.0,
+        iou_threshold: float = 0.1,
+        reject_backward: bool = True,
+        backward_rejection_angle: float = 120.0,
+        priority: int = 5,
+        name: str = "DirectionalTrackletGenerator",
+        **kwargs,
+    ) -> "DirectionalMotionTracker":
+        """Create DirectionalMotionTracker configured for tracklet generation.
+
+        Convenience constructor with sensible defaults for tracklet generation.
+
+        Args:
+            long_kde_path: Path to long-distance KDE model
+            kde_threshold: Movement threshold for KDE vs distance scoring
+            max_match_distance: Maximum distance to consider for matching
+            min_probability_threshold: Minimum probability to continue track
+            proximity_threshold: Minimum distance to other instances
+            iou_threshold: Maximum IoU with other instances
+            reject_backward: If True, reject extreme backward movements
+            backward_rejection_angle: Angle above which movement is rejected
+            priority: Priority level
+            name: Layer name
+            **kwargs: Additional arguments
+
+        Returns:
+            DirectionalMotionTracker configured for tracklet generation
+        """
+        return cls(
+            long_kde_path=long_kde_path,
+            kde_threshold=kde_threshold,
+            max_match_distance=max_match_distance,
+            min_probability_threshold=min_probability_threshold,
+            proximity_threshold=proximity_threshold,
+            iou_threshold=iou_threshold,
+            reject_backward=reject_backward,
+            backward_rejection_angle=backward_rejection_angle,
+            priority=priority,
+            name=name,
+            **kwargs,
+        )
