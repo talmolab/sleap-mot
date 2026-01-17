@@ -1,4 +1,3 @@
-from typing import Any
 from sleap_mot.tracking.feature_tracking.base import FeatureTracker
 import numpy as np
 import sleap_io as sio
@@ -17,9 +16,15 @@ class RFIDFeatureTracker(FeatureTracker):
     to assign tracks to animals.
     """
 
-    def __init__(self):
-        """Initialize the RFIDFeatureTracker."""
-        super().__init__()
+    def __init__(self, priority: int = 10, name: str = "RFIDFeatureTracker"):
+        """Initialize the RFIDFeatureTracker.
+
+        Args:
+            priority: Priority level for conflict resolution (higher = more authoritative).
+                      RFID tracking typically has high priority (default: 10).
+            name: Name of this tracking layer.
+        """
+        super().__init__(priority=priority, name=name)
         self.heatmaps = None
         self.heatmaps_path = None
 
@@ -64,7 +69,7 @@ class RFIDFeatureTracker(FeatureTracker):
 
     def _get_unit_label_polygons(
         self,
-        unit_label,
+        rfid_id,
         rfid_pings,
         labels,
         body_inds,
@@ -73,7 +78,18 @@ class RFIDFeatureTracker(FeatureTracker):
         fps,
         pad,
     ):
-        """Get all instacne polygons for a specific unit label RFID reciever."""
+        """Get all instance polygons for a specific RFID chip ID (animal).
+
+        Args:
+            rfid_id: The RFID chip ID (IdRFID) to filter for - this identifies the animal.
+            rfid_pings: DataFrame containing RFID ping data.
+            labels: SLEAP Labels object.
+            body_inds: Indices of body nodes to use for polygon generation.
+            video_timestamp: Video timestamp to match.
+            polygon_method: Method to use for polygon generation.
+            fps: Frames per second for duration calculation.
+            pad: Padding for polygon expansion.
+        """
         # Method mapping
         methods = {
             "convex_hull": self._get_hull_polygons,
@@ -81,19 +97,19 @@ class RFIDFeatureTracker(FeatureTracker):
             "ellipse": self._get_ellipse_polygons,
         }
         polygon_func = methods.get(polygon_method, self._get_hull_polygons)
-        # Filter DataFrame for the specified unit label
-        unit_label_df = rfid_pings[rfid_pings["unitLabel"] == unit_label]
+        # Filter DataFrame for the specified RFID ID (animal chip)
+        rfid_id_df = rfid_pings[rfid_pings["IdRFID"] == rfid_id]
 
-        # Check if the DataFrame for the unit label is empty
-        if unit_label_df.empty:
-            # print(f"No data found for unit label {unit_label}.")
+        # Check if the DataFrame for the RFID ID is empty
+        if rfid_id_df.empty:
+            # print(f"No data found for RFID ID {rfid_id}.")
             return []
 
         # List to hold polygons for return
         polygons = []
 
         # Iterate through each row in the filtered DataFrame
-        for index, row in unit_label_df.iterrows():
+        for index, row in rfid_id_df.iterrows():
             start_frame = int(row["frame_number"])
             duration = int(row["eventDuration"])
             end_frame = int(start_frame + ((duration / 1000) * fps))
@@ -193,9 +209,9 @@ class RFIDFeatureTracker(FeatureTracker):
         if video_number_filter is not None:
             rfid_pings = rfid_pings[rfid_pings["video_number"] == video_number_filter]
 
-        # Get unique units
-        unique_units = rfid_pings["unitLabel"].unique()
-        print(f"Found {len(unique_units)} unique RFID units: {unique_units}")
+        # Get unique RFID IDs (animal chip IDs, not receiver locations)
+        unique_units = rfid_pings["IdRFID"].unique()
+        print(f"Found {len(unique_units)} unique RFID IDs: {unique_units}")
 
         # Set default body nodes if not provided
         if body_nodes is None:
@@ -353,31 +369,45 @@ class RFIDFeatureTracker(FeatureTracker):
         plots_by_unit,
         labels,
         window_size,
-
+        max_instances: int,
         frame_column_title="frame_number",
         unit_column_title="unitLabel",
         id_column_title="IdRFID",
     ):
+        """Assign RFID tags to tracklets based on spatial heatmaps and RFID ping data.
 
-        """Assign RFID tags to tracklets based on spatial heatmaps and RFID ping data."""
+        Args:
+            rfid_pings: DataFrame containing RFID ping data
+            unique_units: Array of unique RFID unit labels
+            plots_by_unit: List of heatmap arrays for each unit
+            labels: SLEAP Labels object
+            window_size: Frame window to look for matching instances
+            max_instances: Maximum number of instances per frame (determines DataFrame columns)
+            frame_column_title: Column name for frame numbers in rfid_pings
+            unit_column_title: Column name for unit labels in rfid_pings
+            id_column_title: Column name for RFID IDs in rfid_pings
 
-        # Create a DataFrame of shape (len(labels), len(unique_units))
+        Returns:
+            DataFrame of shape (num_frames, max_instances) where each cell contains
+            {rfid_id: probability} dict or None
+        """
+        # Create a DataFrame of shape (num_frames, max_instances)
         num_frames = len(labels)
-        num_tracks = len(labels.tracks)
         probabilities_df = pd.DataFrame(
-            data=np.full((num_frames, num_tracks), None, dtype=object), 
-            index=np.arange(num_frames), 
-            columns=np.arange(num_tracks)
+            data=np.full((num_frames, max_instances), None, dtype=object),
+            index=np.arange(num_frames),
+            columns=np.arange(max_instances)
         )
 
         # Iterate through each RFID ping
         for row in rfid_pings.iterrows():
             rfid_ping = rfid_pings.loc[row[0]]
-            unit_label = rfid_ping[unit_column_title]
+            # FIX: Look up heatmap by IdRFID (animal chip) not unitLabel (receiver)
+            rfid_id = rfid_ping[id_column_title]
 
-            if unit_label in unique_units:
-                # Find index of this unit's heatmap in plots_by_unit
-                unit_idx = np.where(unique_units == unit_label)[0][0]
+            if rfid_id in unique_units:
+                # Find index of this animal's heatmap in plots_by_unit
+                unit_idx = np.where(unique_units == rfid_id)[0][0]
                 heatmap = plots_by_unit[unit_idx]
 
                 # Get frame number for this ping
@@ -396,7 +426,11 @@ class RFIDFeatureTracker(FeatureTracker):
                     instances = labels.find(frame_idx=frame_idx, video=labels.video, return_new=True)[0].instances
 
                     # Calculate probability for each pose in this frame
-                    for pose_idx, pose in enumerate[Any](instances):
+                    for pose_idx, pose in enumerate(instances):
+                        # Skip if pose_idx exceeds max_instances
+                        if pose_idx >= max_instances:
+                            continue
+
                         # Get center coordinates
                         centroid = get_centroid(pose)
                         center_x = int(centroid[0])
@@ -447,36 +481,94 @@ class RFIDFeatureTracker(FeatureTracker):
     def track(
         self,
         labels: sio.Labels,
-        video_path: str,
-        output_path: str,
-        rfid_pings_path: str,
-        window_size: int = 1,
+        max_instances: int = None,
+        video_path: str = None,
+        output_path: str = None,
+        rfid_pings_path: str = None,
+        window_size: int = 5,
     ):
-        """Track instances across frames using either bbox or motion-based tracking.
+        """Track instances across frames using RFID-based tracking.
 
         Args:
             labels: SLEAP labels object containing instances to track
-            video_path: Path to the video file
-            output_path: Path to save tracking results
-            rfid_pings_path: Path to RFID ping data
-            window_size (int, optional): Frame window to look for a matching instance to an RFID ping. Defaults to 5.
-        """
-        with h5py.File(self.heatmaps_path, "r") as f:
+            max_instances: Maximum number of instances per frame. If None,
+                calculated automatically as the max instances across all frames.
+            video_path: Path to the video file (optional, for path replacement)
+            output_path: Path to save tracking results (optional)
+            rfid_pings_path: Path to RFID ping data CSV file
+            window_size (int, optional): Frame window to look for a matching
+                instance to an RFID ping. Defaults to 5.
 
+        Returns:
+            labels: The Labels object with track assignments
+        """
+        # Calculate max_instances if not provided
+        if max_instances is None:
+            max_instances = self._calculate_max_instances(labels)
+            print(f"Calculated max_instances: {max_instances}")
+        if self.heatmaps_path is None:
+            raise ValueError(
+                "Heatmaps path not set. Call generate_heatmaps() first or set "
+                "heatmaps_path manually."
+            )
+
+        if rfid_pings_path is None:
+            raise ValueError("rfid_pings_path is required")
+
+        # Load heatmaps from H5 file
+        print(f"Loading heatmaps from {self.heatmaps_path}...")
+        with h5py.File(self.heatmaps_path, "r") as f:
             plots_by_unit = list(f["plots_by_unit"])
             # Convert bytes back to strings
             unique_units = np.array(
                 [name.decode("utf-8") for name in f["unique_units"]]
             )
+        print(f"Loaded {len(unique_units)} unit heatmaps")
 
+        # Load RFID pings
+        print(f"Loading RFID pings from {rfid_pings_path}...")
         rfid_pings = pd.read_csv(rfid_pings_path)
+        print(f"Loaded {len(rfid_pings)} RFID pings")
 
+        # Check for existing tracklets
         tracklets = self.get_current_tracklets(labels)
         if tracklets is None:
+            print("No existing tracklets found, using window_size=1")
             window_size = 1
+            # Disable tracklet-only mode since there are no tracklets
+            self.only_apply_to_tracklets = False
+        else:
+            print(f"Found {len(tracklets)} existing tracklets")
 
-        probabilities_df = self.process_rfid_pings(rfid_pings, unique_units, plots_by_unit, labels, window_size)
+        # Process RFID pings to generate probabilities
+        print("Processing RFID pings...")
+        probabilities_df = self.process_rfid_pings(
+            rfid_pings, unique_units, plots_by_unit, labels, window_size, max_instances
+        )
 
+        # Count non-null cells
+        non_null_count = probabilities_df.notna().sum().sum()
+        print(f"Generated probabilities DataFrame: {probabilities_df.shape}, "
+              f"{non_null_count} non-null cells")
+
+        # Assign track IDs based on probabilities
+        print("Assigning track IDs...")
         self.assign_track_ids(probabilities_df, labels)
+
+        # Count assigned tracks
+        assigned_count = sum(
+            1 for lf in labels for inst in lf.instances if inst.track is not None
+        )
+        unique_tracks = set(
+            inst.track.name for lf in labels for inst in lf.instances
+            if inst.track is not None
+        )
+        print(f"Assigned {assigned_count} instances to {len(unique_tracks)} unique tracks")
+
+        # Save if output path provided
+        if output_path is not None:
+            print(f"Saving results to {output_path}...")
+            sio.save_file(labels, output_path)
+            print("Done!")
 
         return labels

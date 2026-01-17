@@ -1460,13 +1460,13 @@ class RFIDFeatureTracker(FeatureTracker):
             window_size (int, optional): Frame window to look for a matching instance to an RFID ping. Defaults to 5.
             percentile (int, optional): Percentile for KDE thresholding. Used for motion model method only. Defaults to 95.
         """
-        with h5py.File(self.heatmaps_path, "r") as f:
+        # with h5py.File(self.heatmaps_path, "r") as f:
 
-            plots_by_unit = list(f["plots_by_unit"])
-            # Convert bytes back to strings
-            unique_units = np.array(
-                [name.decode("utf-8") for name in f["unique_units"]]
-            )
+        #     plots_by_unit = list(f["plots_by_unit"])
+        #     # Convert bytes back to strings
+        #     unique_units = np.array(
+        #         [name.decode("utf-8") for name in f["unique_units"]]
+        #     )
 
         labels = self.load_and_preprocess_labels(labels, video_path)
         trx, track_names, iou_per_pose = self.extract_tracking_data(labels)

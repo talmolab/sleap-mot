@@ -1,16 +1,234 @@
 import sleap_io as sio
+import json
+import os
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 from dataclasses import dataclass, field
+from pathlib import Path
 
 @dataclass
 class TrackContext:
+    """Context wrapper for track assignments with history tracking.
+
+    Attributes:
+        priority: Priority level of the layer that made this assignment.
+        track: The underlying sleap_io Track object.
+        name: Track name/identity.
+        temporary_track: Whether this is a temporary track that can be overridden.
+        valid: Whether this track assignment is valid.
+        track_history: List of history entries recording all assignment changes.
+    """
+
     priority: int or None
     track: sio.Track
     name: str
     temporary_track: bool = False
     valid: bool = True
     track_history: List[Dict] = field(default_factory=list)
+
+    def add_history_entry(
+        self,
+        layer_name: str,
+        old_track_name: Optional[str],
+        new_track_name: str,
+        frame_idx: int,
+        reason: str,
+        conflict_resolved: bool = False,
+        propagated_from_frame: Optional[int] = None,
+    ) -> None:
+        """Record a track assignment change in history.
+
+        Args:
+            layer_name: Name of the tracking layer making the change.
+            old_track_name: Previous track name (None if first assignment).
+            new_track_name: New track name being assigned.
+            frame_idx: Frame index where change occurred.
+            reason: Human-readable explanation.
+            conflict_resolved: Whether this resolved a priority conflict.
+            propagated_from_frame: Source frame if propagated from elsewhere.
+        """
+        entry = {
+            "layer_name": layer_name,
+            "old_track_name": old_track_name,
+            "new_track_name": new_track_name,
+            "frame_idx": frame_idx,
+            "reason": reason,
+            "conflict_resolved": conflict_resolved,
+            "propagated_from_frame": propagated_from_frame,
+        }
+        self.track_history.append(entry)
+
+    def get_history_entries(self) -> List:
+        """Get typed history entries.
+
+        Returns:
+            List of TrackHistoryEntry objects.
+        """
+        from sleap_mot.metrics.types import TrackHistoryEntry
+
+        return [TrackHistoryEntry.from_dict(d) for d in self.track_history]
+
+    def is_valid(self) -> bool:
+        """Check if this track context is valid.
+
+        Returns:
+            True if valid, False otherwise.
+        """
+        return self.valid
+
+
+def extract_all_track_histories(labels: sio.Labels) -> Dict[str, List[Dict]]:
+    """Extract all track histories from labels before converting to sio.Track.
+
+    This function collects track_history data from all TrackContext objects
+    in the labels, indexed by track name. Call this BEFORE calling
+    convert_context_objects_to_tracks() to preserve history data.
+
+    Args:
+        labels: Labels object containing instances with TrackContext tracks.
+
+    Returns:
+        Dict mapping track names to lists of history entry dicts.
+        Each history entry contains:
+            - layer_name: Which tracking layer made the decision
+            - old_track_name: Previous identity
+            - new_track_name: New identity assigned
+            - frame_idx: Frame where change occurred
+            - reason: Why the change was made
+            - conflict_resolved: Whether a conflict was resolved
+            - propagated_from_frame: Source frame if propagated
+    """
+    histories = {}
+
+    for lf in labels.labeled_frames:
+        for inst in lf.instances:
+            if inst.track is None:
+                continue
+
+            # Handle TrackContext objects
+            if isinstance(inst.track, TrackContext):
+                track_name = inst.track.name
+                if inst.track.track_history:
+                    if track_name not in histories:
+                        histories[track_name] = []
+                    # Add entries we haven't seen yet
+                    for entry in inst.track.track_history:
+                        # Check for duplicates based on frame_idx and layer_name
+                        is_duplicate = any(
+                            e["frame_idx"] == entry["frame_idx"]
+                            and e["layer_name"] == entry["layer_name"]
+                            and e["new_track_name"] == entry["new_track_name"]
+                            for e in histories[track_name]
+                        )
+                        if not is_duplicate:
+                            histories[track_name].append(entry)
+
+    # Sort each track's history by frame_idx
+    for track_name in histories:
+        histories[track_name] = sorted(
+            histories[track_name], key=lambda e: e["frame_idx"]
+        )
+
+    return histories
+
+
+def save_track_history(
+    histories: Dict[str, List[Dict]],
+    output_path: Union[str, Path],
+) -> str:
+    """Save track history data to a JSON file.
+
+    Creates a sidecar JSON file containing track_history data that would
+    otherwise be lost when saving .slp files.
+
+    Args:
+        histories: Dict mapping track names to history entry lists.
+            Typically obtained from extract_all_track_histories().
+        output_path: Path for the JSON file. If it doesn't end with
+            '_track_history.json', this suffix will be added.
+
+    Returns:
+        The actual path where the file was saved.
+
+    Example:
+        >>> histories = extract_all_track_histories(labels)
+        >>> save_track_history(histories, "output.slp")
+        'output_track_history.json'
+    """
+    output_path = str(output_path)
+
+    # Generate appropriate filename
+    if output_path.endswith("_track_history.json"):
+        history_path = output_path
+    elif output_path.endswith(".slp"):
+        history_path = output_path.replace(".slp", "_track_history.json")
+    elif output_path.endswith(".json"):
+        history_path = output_path
+    else:
+        history_path = output_path + "_track_history.json"
+
+    # Add metadata
+    data = {
+        "version": "1.0",
+        "description": "Track history data for sleap-mot layer attribution analysis",
+        "track_histories": histories,
+    }
+
+    with open(history_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    return history_path
+
+
+def load_track_history(
+    input_path: Union[str, Path],
+) -> Dict[str, List[Dict]]:
+    """Load track history data from a JSON file.
+
+    Args:
+        input_path: Path to the JSON file. Can be either:
+            - Direct path to *_track_history.json
+            - Path to .slp file (will look for matching *_track_history.json)
+
+    Returns:
+        Dict mapping track names to history entry lists.
+
+    Raises:
+        FileNotFoundError: If the history file doesn't exist.
+
+    Example:
+        >>> histories = load_track_history("output.slp")
+        >>> for track_name, entries in histories.items():
+        ...     print(f"{track_name}: {len(entries)} history entries")
+    """
+    input_path = str(input_path)
+
+    # Determine the history file path
+    if input_path.endswith("_track_history.json"):
+        history_path = input_path
+    elif input_path.endswith(".slp"):
+        history_path = input_path.replace(".slp", "_track_history.json")
+    elif input_path.endswith(".json"):
+        history_path = input_path
+    else:
+        history_path = input_path + "_track_history.json"
+
+    if not os.path.exists(history_path):
+        raise FileNotFoundError(
+            f"Track history file not found: {history_path}\n"
+            f"Track history is only available if save_track_history=True was used "
+            f"when saving the .slp file."
+        )
+
+    with open(history_path, "r") as f:
+        data = json.load(f)
+
+    # Handle both old format (just histories) and new format (with metadata)
+    if "track_histories" in data:
+        return data["track_histories"]
+    else:
+        return data
+
 
 @dataclass
 class ConflictResolutionState:
@@ -28,11 +246,57 @@ class TrackingLayer(ABC):
         self.temporary = temporary
 
     def convert_tracks_to_context_objects(self, labels: sio.Labels, priority: int = None):
+        """Convert sio.Track objects to TrackContext wrappers.
+
+        Only converts tracks that are not already TrackContext objects.
+
+        Args:
+            labels: SLEAP Labels object containing instances
+            priority: Priority level for the TrackContext (optional)
+        """
         for lf in labels.labeled_frames:
             for inst in lf.instances:
-                inst.track = TrackContext(priority, inst.track)
+                if inst.track is not None and not isinstance(inst.track, TrackContext):
+                    inst.track = TrackContext(
+                        priority=priority,
+                        track=inst.track,
+                        name=inst.track.name,
+                        temporary_track=False,
+                        valid=True,
+                        track_history=[]
+                    )
 
-    def convert_context_objects_to_tracks(self, labels: sio.Labels):
+    def convert_context_objects_to_tracks(
+        self,
+        labels: sio.Labels,
+        save_track_history_path: Optional[Union[str, Path]] = None,
+    ) -> Optional[Dict[str, List[Dict]]]:
+        """Convert TrackContext objects back to sio.Track objects.
+
+        This method extracts the underlying sio.Track from each TrackContext
+        and removes invalid instances. Optionally saves track_history data
+        to a sidecar JSON file before the conversion.
+
+        Args:
+            labels: Labels object with TrackContext instances.
+            save_track_history_path: If provided, saves track_history data to
+                this path before conversion. Can be:
+                - Path to .slp file (will create *_track_history.json)
+                - Direct path to JSON file
+                - True to return histories without saving
+
+        Returns:
+            If save_track_history_path is provided, returns the extracted
+            track histories dict. Otherwise returns None.
+        """
+        # Extract histories before conversion if requested
+        histories = None
+        if save_track_history_path is not None:
+            histories = extract_all_track_histories(labels)
+            if isinstance(save_track_history_path, (str, Path)):
+                save_track_history(histories, save_track_history_path)
+
+        # Convert TrackContext to sio.Track
         for lf in labels.labeled_frames:
             instances = []
             for inst in lf.instances:
@@ -40,6 +304,8 @@ class TrackingLayer(ABC):
                     inst.track = inst.track.track
                     instances.append(inst)
             lf.instances = instances
+
+        return histories
 
     def clear_tracks(self, labels: sio.Labels):
         for lf in labels.labeled_frames:
@@ -408,5 +674,5 @@ class TrackingLayer(ABC):
         pass
 
     @abstractmethod
-    def track(self, labels: sio.Labels, priority: int):
+    def track(self, labels: sio.Labels, priority: int, max_instances: int):
         pass
