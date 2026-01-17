@@ -43,6 +43,7 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         temporary: Whether tracks from this layer are temporary
         max_gap: Maximum frame gap to search for associations (default 1)
         matching_method: Assignment algorithm ("hungarian" or "greedy")
+        clear_tracks: Whether to clear existing tracks before tracking (default True)
     """
 
     def __init__(
@@ -52,6 +53,7 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         temporary: bool = True,
         max_gap: int = 1,
         matching_method: str = "hungarian",
+        clear_tracks: bool = True,
         **kwargs
     ):
         """Initialize the online tracking layer.
@@ -63,6 +65,9 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
                 to True if in tracklet mode)
             max_gap: Maximum frame gap to search for associations
             matching_method: Assignment algorithm ("hungarian" or "greedy")
+            clear_tracks: If True, clear existing track assignments before tracking.
+                If False, existing tracks are preserved (but may be overwritten
+                during tracking). Default True.
             **kwargs: Additional arguments for subclass configuration
         """
         # Initialize thresholds first so is_tracklet_mode works
@@ -75,6 +80,7 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
         self.max_gap = max_gap
         self.matching_method = matching_method
+        self.clear_tracks = clear_tracks
         self._track_counter = 0
         self._tracklet_counter = 0
 
@@ -178,6 +184,13 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         """
         if len(labels.videos) > 1:
             raise NotImplementedError("Multiple videos are not supported.")
+
+        # Clear existing tracks if requested
+        if self.clear_tracks:
+            for lf in labels.labeled_frames:
+                for inst in lf.instances:
+                    inst.track = None
+            labels.tracks = []
 
         # Calculate max instances if not provided
         if max_instances is None:
