@@ -3,7 +3,7 @@
 from typing import Dict, Optional, List, Deque, DefaultDict, Union
 import numpy as np
 import sleap_io as sio
-from sleap_mot.track_instance import (
+from sleap_mot._legacy.track_instance import (
     TrackInstanceLocalQueue,
     TrackedInstanceFeature,
 )

@@ -2,8 +2,8 @@ import pytest
 import numpy as np
 
 # from sleap_nn.inference.predictors import main
-from sleap_mot.tracker import Tracker, FlowShiftTracker
-from sleap_mot.track_instance import (
+from sleap_mot._legacy.tracker import Tracker, FlowShiftTracker
+from sleap_mot._legacy.track_instance import (
     TrackedInstanceFeature,
     TrackInstanceLocalQueue,
     TrackInstances,
