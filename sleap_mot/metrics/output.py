@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from sleap_mot.metrics.types import MetricResult, TrackHistoryEntry
+from sleap_mot.metrics.types import MetricResult, TrackHistoryEntry, SwitchExplanation
 
 
 class MetricsExporter:
@@ -284,24 +284,44 @@ class MetricsExporter:
                         "propagated_from_frame": entry.propagated_from_frame,
                     }
 
+                    # Include detailed explanation if available
+                    if entry.explanation is not None:
+                        if hasattr(entry.explanation, 'to_dict'):
+                            enhanced["explanation"] = entry.explanation.to_dict()
+                        elif isinstance(entry.explanation, dict):
+                            enhanced["explanation"] = entry.explanation
+
             enhanced_events.append(enhanced)
 
         # Build track histories in serializable format
         serialized_histories = {}
         if track_histories:
             for track_name, entries in track_histories.items():
-                serialized_histories[track_name] = [
-                    entry.to_dict() if hasattr(entry, "to_dict") else {
-                        "layer_name": entry.layer_name,
-                        "old_track_name": entry.old_track_name,
-                        "new_track_name": entry.new_track_name,
-                        "frame_idx": entry.frame_idx,
-                        "reason": entry.reason,
-                        "conflict_resolved": entry.conflict_resolved,
-                        "propagated_from_frame": entry.propagated_from_frame,
-                    }
-                    for entry in entries
-                ]
+                serialized_entries = []
+                for entry in entries:
+                    if hasattr(entry, "to_dict"):
+                        # TrackHistoryEntry with to_dict method
+                        entry_dict = entry.to_dict()
+                    else:
+                        # Dict entry (legacy format)
+                        entry_dict = {
+                            "layer_name": entry.layer_name if hasattr(entry, 'layer_name') else entry.get("layer_name"),
+                            "old_track_name": entry.old_track_name if hasattr(entry, 'old_track_name') else entry.get("old_track_name"),
+                            "new_track_name": entry.new_track_name if hasattr(entry, 'new_track_name') else entry.get("new_track_name"),
+                            "frame_idx": entry.frame_idx if hasattr(entry, 'frame_idx') else entry.get("frame_idx"),
+                            "reason": entry.reason if hasattr(entry, 'reason') else entry.get("reason"),
+                            "conflict_resolved": entry.conflict_resolved if hasattr(entry, 'conflict_resolved') else entry.get("conflict_resolved", False),
+                            "propagated_from_frame": entry.propagated_from_frame if hasattr(entry, 'propagated_from_frame') else entry.get("propagated_from_frame"),
+                        }
+                        # Handle explanation for dict entries
+                        explanation = entry.get("explanation") if isinstance(entry, dict) else getattr(entry, 'explanation', None)
+                        if explanation is not None:
+                            if hasattr(explanation, 'to_dict'):
+                                entry_dict["explanation"] = explanation.to_dict()
+                            elif isinstance(explanation, dict):
+                                entry_dict["explanation"] = explanation
+                    serialized_entries.append(entry_dict)
+                serialized_histories[track_name] = serialized_entries
 
         # Build summary from results
         accuracy_result = self.results.get("accuracy")

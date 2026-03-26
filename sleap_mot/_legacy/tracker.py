@@ -11,9 +11,9 @@ import logging
 import imageio.v3 as iio
 
 import sleap_io as sio
-from sleap_mot.candidates.fixed_window import FixedWindowCandidates
-from sleap_mot.candidates.local_queues import LocalQueueCandidates
-from sleap_mot.track_instance import (
+from sleap_mot._legacy.candidates.fixed_window import FixedWindowCandidates
+from sleap_mot._legacy.candidates.local_queues import LocalQueueCandidates
+from sleap_mot._legacy.track_instance import (
     TrackedInstanceFeature,
     TrackInstances,
     TrackInstanceLocalQueue,

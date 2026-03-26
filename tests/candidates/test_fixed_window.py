@@ -1,7 +1,7 @@
 from collections import deque
-from sleap_mot.track_instance import TrackedInstanceFeature
-from sleap_mot.candidates.fixed_window import FixedWindowCandidates
-from sleap_mot.tracker import Tracker
+from sleap_mot._legacy.track_instance import TrackedInstanceFeature
+from sleap_mot._legacy.candidates.fixed_window import FixedWindowCandidates
+from sleap_mot._legacy.tracker import Tracker
 
 
 def test_fixed_window_candidates(centered_pair_predictions):

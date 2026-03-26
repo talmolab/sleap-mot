@@ -1,6 +1,6 @@
 from collections import deque, defaultdict
-from sleap_mot.candidates.local_queues import LocalQueueCandidates
-from sleap_mot.tracker import Tracker
+from sleap_mot._legacy.candidates.local_queues import LocalQueueCandidates
+from sleap_mot._legacy.tracker import Tracker
 
 
 def test_local_queues_candidates(centered_pair_predictions):

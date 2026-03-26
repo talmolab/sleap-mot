@@ -25,7 +25,9 @@ dependencies = [
     "motmetrics",
     "hmmlearn",
     "pandas",
-    "matplotlib"]
+    "matplotlib",
+    "pyyaml",
+    "click"]
 dynamic = ["version", "readme"]
 
 [tool.setuptools.dynamic]
@@ -48,6 +50,9 @@ dev = [
     "mkdocs-literate-nav",
     "mkdocs-section-index",
     "mike"]
+
+[project.scripts]
+sleap-mot = "sleap_mot.cli:main"
 
 [project.urls]
 Homepage = "https://sleap.ai"
