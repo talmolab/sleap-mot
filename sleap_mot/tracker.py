@@ -439,6 +439,196 @@ class Tracker:
 
         return sorted_labels
 
+    def force_match_remaining_instances(self, lf, labels):
+        """Force match remaining untracked instances to unused global tracks.
+
+        This method finds instances in the current frame that don't have global track IDs
+        and matches them to unused global tracks by finding the closest instances of those
+        tracks in previous frames and using OKS scoring for matching.
+
+        Args:
+            lf: LabeledFrame object containing the current frame instances
+
+        Returns:
+            lf: Updated LabeledFrame with force-matched instances
+        """
+        # Get current track names in this frame
+        curr_track_names = [
+            inst.track.name
+            for inst in lf.instances
+            if inst.track and inst.track.name in self.global_track_ids
+        ]
+
+        # Find unused global tracks
+        unused_global_tracks = [
+            track_name
+            for track_name in self.global_track_ids.keys()
+            if track_name not in curr_track_names
+        ]
+
+        # Find untracked instances (those without global track IDs)
+        untracked_instances = [
+            inst
+            for inst in lf.instances
+            if inst.track.name not in self.global_track_ids.keys()
+        ]
+
+        # If no unused tracks or no untracked instances, return early
+        if not unused_global_tracks or not untracked_instances:
+            return lf
+
+        # Get features for untracked instances
+        untracked_features = self.get_features(untracked_instances, lf.frame_idx)
+
+        # Find closest instances of unused global tracks from previous frames
+        global_track_instances = []
+        for track_name in unused_global_tracks:
+            closest_instance = self._find_closest_global_track_instance(
+                track_name, lf, labels
+            )
+            if closest_instance is not None:
+                global_track_instances.append((track_name, closest_instance))
+
+        if not global_track_instances:
+            return lf
+
+        # Create feature dictionary for global track instances
+        candidates_feature_dict = {}
+        for track_name, instance in global_track_instances:
+            # Create a single-element list to mimic the structure expected by get_scores
+            feature = self.get_features([instance], lf.frame_idx)
+            if self.is_local_queue:
+                feature_list = [
+                    feature[0]
+                ]  # Extract the feature from TrackInstanceLocalQueue
+            else:
+                feature_list = [
+                    feature.features[0]
+                ]  # Extract the feature from TrackInstances
+
+            candidates_feature_dict[track_name] = [
+                TrackedInstanceFeature(
+                    feature=feature_list[0],
+                    src_predicted_instance=instance,
+                    frame_idx=lf.frame_idx,
+                    tracking_score=None,
+                    instance_score=None,
+                    shifted_keypoints=None,
+                )
+            ]
+
+        # Compute scores between untracked instances and global track instances
+        scores = self.get_scores(untracked_features, candidates_feature_dict)
+
+        # Convert scores to cost matrix
+        cost_matrix = self.scores_to_cost_matrix(scores)
+
+        # Use the same matching method as track_frame
+        matching_method = self._track_matching_methods[self.track_matching_method]
+
+        # Convert cost_matrix dict to numpy array for matching algorithm
+        valid_track_ids = [tid for tid, costs in cost_matrix.items() if costs.size > 0]
+        if not valid_track_ids:
+            return lf
+
+        costs_array = np.array([cost_matrix[tid] for tid in valid_track_ids])
+
+        # Handle single track case
+        if costs_array.ndim == 1:
+            costs_array = costs_array.reshape(1, -1)
+
+        if costs_array.shape[0] > 0 and costs_array.shape[1] > 0:
+            row_ind, col_ind = matching_method(costs_array)
+
+            # Apply matches
+            for row, col in zip(row_ind, col_ind):
+                score = -costs_array[row, col]  # Convert cost back to score
+
+                # Only assign if score meets threshold
+                if score > -1e10 and (self.max_cost is None or score < self.max_cost):
+                    track_id = valid_track_ids[row]
+                    instance_idx = col
+
+                    # Assign the global track to the untracked instance
+                    untracked_instances[instance_idx].track = self.global_track_ids[
+                        track_id
+                    ]
+
+        return lf
+
+    def _find_closest_global_track_instance(self, track_name, current_lf, labels):
+        """Find the closest instance of a global track in previous frames.
+
+        Args:
+            track_name: Name of the global track to find
+            current_lf: Current labeled frame
+
+        Returns:
+            PredictedInstance: The closest instance of the track, or None if not found
+        """
+        closest_instance = None
+        min_frame_diff = float("inf")
+
+        # Search backwards through labeled frames to find the most recent instance with this track
+        current_frame_idx = current_lf.frame_idx
+
+        # Search in previous frames
+        for prev_lf in reversed(
+            labels.labeled_frames[: labels.labeled_frames.index(current_lf)]
+        ):
+            for inst in prev_lf.instances:
+                if inst.track and inst.track.name == track_name:
+                    frame_diff = abs(current_frame_idx - prev_lf.frame_idx)
+                    if frame_diff < min_frame_diff:
+                        min_frame_diff = frame_diff
+                        closest_instance = inst
+            if closest_instance is not None:
+                break  # Found the closest in time, stop searching
+
+        # If not found in previous frames, search in future frames
+        if closest_instance is None:
+            for next_lf in labels.labeled_frames[
+                labels.labeled_frames.index(current_lf) + 1 :
+            ]:
+                for inst in next_lf.instances:
+                    if inst.track and inst.track.name == track_name:
+                        frame_diff = abs(current_frame_idx - next_lf.frame_idx)
+                        if frame_diff < min_frame_diff:
+                            min_frame_diff = frame_diff
+                            closest_instance = inst
+                if closest_instance is not None:
+                    break  # Found the closest in time, stop searching
+
+        return closest_instance
+
+    def resolve_track_id(self, lf, labels):
+        """Uses basic tracking to resolve track IDs for instances that don't have a track ID."""
+        curr_track_names = [
+            inst.track.name
+            for inst in lf.instances
+            if inst.track and inst.track.name in self.global_track_ids
+        ]
+        unused_global_tracks = [
+            track_name
+            for track_name in self.global_track_ids.keys()
+            if track_name not in curr_track_names
+        ]
+        untracked_instances = []
+        for inst in lf.instances:
+            if inst.track.name not in self.global_track_ids.keys():
+                untracked_instances.append(inst)
+
+        # Simple case: one unused track and one untracked instance
+        if len(unused_global_tracks) == 1 and len(untracked_instances) == 1:
+            untracked_instances[0].track = self.global_track_ids[
+                unused_global_tracks[0]
+            ]
+        else:
+            # Use force matching for more complex cases
+            lf = self.force_match_remaining_instances(lf, labels)
+
+        return lf
+
     def track(
         self,
         labels: sio.Labels,
@@ -462,8 +652,8 @@ class Tracker:
 
         can_load_images = labels.video.exists()
 
-        sorted_labels = self.sort_labels(labels)
-        labels.labeled_frames = sorted_labels
+        # sorted_labels = self.sort_labels(labels)
+        # labels.labeled_frames = sorted_labels
 
         self.global_track_ids = {t.name: t for t in labels.tracks}
 
@@ -509,6 +699,12 @@ class Tracker:
                 beta=0.7,
                 patch_dimension=50,
             )
+
+        else:
+            for lf in labels:
+                for inst in lf.instances:
+                    if inst.track.name not in self.global_track_ids:
+                        self.resolve_track_id(lf, labels)
 
         labels.update()
 
@@ -686,9 +882,8 @@ class Tracker:
                 track_features = self.candidate.get_features_from_track_id(
                     track_id, candidates_list
                 )
-                if (
-                    all(x.feature is None for x in track_features)
-                    and generate_new_tracks
+                if all(x.feature is None for x in track_features) and (
+                    generate_new_tracks or track_id not in self.global_track_ids
                 ):
                     if (
                         track_id in self.candidate.current_tracks
@@ -976,7 +1171,7 @@ class Tracker:
             Dict: Dictionary mapping track names to averaged visual features
         """
 
-        def full_pose_available(inst: sio.PredictedInstance) -> bool:
+        def full_pose_available(inst: np.ndarray) -> bool:
             """Check if all keypoints in an instance are available (not NaN).
 
             Args:
@@ -985,8 +1180,8 @@ class Tracker:
             Returns:
                 bool: True if all keypoints are available, False otherwise
             """
-            for point in inst.points.values():
-                if np.isnan(point.x) or np.isnan(point.y):
+            for point in inst:
+                if np.isnan(point[0]) or np.isnan(point[1]):
                     return False
             return True
 
@@ -997,7 +1192,7 @@ class Tracker:
             image = next(reader)
             for inst in lf.instances:
                 if inst.track.name in self.global_track_ids and full_pose_available(
-                    inst
+                    inst.numpy()
                 ):
                     visual_features = get_bbox_pixel_intensities(
                         inst, image, patch_dimension
@@ -1080,6 +1275,9 @@ class Tracker:
                     else:
                         seq_inst, seq_frame = prev_inst, prev_frame
                         seq_direction = -1
+
+                if prev_frame is None and seq_frame is None:
+                    continue
 
                 if prev_frame is None:
                     prev_inst = seq_inst

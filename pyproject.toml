@@ -23,7 +23,9 @@ dependencies = [
     "sleap-io",
     "scipy",
     "motmetrics",
-    "hmmlearn"]
+    "hmmlearn",
+    "pandas",
+    "matplotlib"]
 dynamic = ["version", "readme"]
 
 [tool.setuptools.dynamic]

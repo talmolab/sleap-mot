@@ -166,3 +166,11 @@ cython_debug/
 .vscode/
 
 *.ipynb
+.DS_Store
+.gitignore
+metrics_results.01.csv
+nohup.out
+.vscode/settings.json
+tests/data/clips/cohort2.220503_153813Camera0_mov.00006.mp4.predictions.feature_tracked.01.slp
+tests/data/clips/cohort2.220516_093004.Camera0.mov.00000.t0=20068.t1=20165/feature_tracked.retracked.01.slp
+tests/data/clips/cohort2.220516_093004.Camera0.mov.00000.t0=20068.t1=20165/feature_tracked.retracked.slp
