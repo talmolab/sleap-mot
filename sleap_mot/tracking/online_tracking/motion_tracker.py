@@ -10,6 +10,16 @@ controlled by threshold parameters.
 
 from sleap_mot.tracking.online_tracking.base import OnlineTrackingLayer
 from sleap_mot.tracking.base import TrackContext
+from sleap_mot.tracking.explanations import (
+    MotionExplanationGenerator,
+    DirectionalMotionExplanationGenerator,
+)
+from sleap_mot.tracking.instance_explanations import (
+    MotionDecisionRecord,
+    DirectionalMotionDecisionRecord,
+    CandidateScore,
+    DecisionType,
+)
 from sleap_mot.utils import get_centroid, get_bbox
 import sleap_io as sio
 import numpy as np
@@ -280,6 +290,14 @@ class MotionTracker(OnlineTrackingLayer):
             **kwargs
         )
 
+        # Create explanation generator
+        self._explanation_generator = MotionExplanationGenerator(
+            max_match_distance=self.max_match_distance,
+            min_probability_threshold=self.min_probability_threshold,
+            proximity_threshold=self.proximity_threshold,
+            iou_threshold=self.iou_threshold,
+        )
+
     def _determine_temporary(self) -> bool:
         """Determine if tracks should be temporary (tracklet mode)."""
         return self.is_tracklet_mode
@@ -300,6 +318,74 @@ class MotionTracker(OnlineTrackingLayer):
             self.iou_threshold is not None,
             self.max_match_distance is not None
         ])
+
+    def _create_decision_record(
+        self,
+        frame_idx: int,
+        instance_idx: int,
+        decision_type: DecisionType,
+        assigned_track_id: Optional[str],
+        previous_track_id: Optional[str],
+        summary: str,
+        reasons: List[str],
+        candidate_scores: List[CandidateScore],
+        instance_centroid: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> MotionDecisionRecord:
+        """Create a MotionDecisionRecord for this tracker.
+
+        Overrides base to include motion-specific information like
+        KDE model used and motion probability.
+
+        Args:
+            frame_idx: Frame index.
+            instance_idx: Instance index within the frame.
+            decision_type: Type of decision made.
+            assigned_track_id: Track ID assigned (None if no assignment).
+            previous_track_id: Previous track ID if any.
+            summary: Human-readable summary.
+            reasons: List of reasons explaining the decision.
+            candidate_scores: List of CandidateScore for all candidates.
+            instance_centroid: (x, y) centroid of the instance.
+            **kwargs: Additional context (motion_probability, kde_model_used).
+
+        Returns:
+            MotionDecisionRecord for this decision.
+        """
+        # Build threshold dict
+        thresholds = {}
+        if self.max_match_distance is not None:
+            thresholds['max_match_distance'] = self.max_match_distance
+        if self.min_probability_threshold is not None:
+            thresholds['min_probability_threshold'] = self.min_probability_threshold
+        if self.proximity_threshold is not None:
+            thresholds['proximity_threshold'] = self.proximity_threshold
+        if self.iou_threshold is not None:
+            thresholds['iou_threshold'] = self.iou_threshold
+
+        # Determine KDE model used
+        kde_model_used = kwargs.get('kde_model_used')
+        if kde_model_used is None and self.long_kde is not None:
+            kde_model_used = "long_short_kde"
+
+        return MotionDecisionRecord(
+            frame_idx=frame_idx,
+            instance_idx=instance_idx,
+            tracker_name=self.name,
+            tracker_priority=self.priority,
+            decision_type=decision_type,
+            assigned_track_id=assigned_track_id,
+            previous_track_id=previous_track_id,
+            summary=summary,
+            reasons=reasons,
+            thresholds=thresholds,
+            instance_centroid=instance_centroid,
+            candidate_scores=candidate_scores,
+            winning_track_id=assigned_track_id,
+            kde_model_used=kde_model_used,
+            motion_probability=kwargs.get('motion_probability'),
+            threshold_checks=kwargs.get('threshold_checks', {}),
+        )
 
     def _load_kde_models(self) -> None:
         """Load KDE models from joblib files.
@@ -477,6 +563,52 @@ class MotionTracker(OnlineTrackingLayer):
 
         return True
 
+    def _get_explanation_context(
+        self,
+        track_id: str,
+        inst_idx: int,
+        track_data: Dict[str, Any],
+        track_candidates: Dict[str, Tuple[int, sio.PredictedInstance]],
+        current_instances: List[sio.PredictedInstance],
+        frame_idx: int,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Get motion-specific context for explanation generation.
+
+        Args:
+            track_id: Track ID being matched.
+            inst_idx: Instance index being matched.
+            track_data: Track data from active_tracks.
+            track_candidates: Dict of track candidates.
+            current_instances: List of current frame instances.
+            frame_idx: Current frame index.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Dict of motion-specific context.
+        """
+        context = {}
+
+        # Get previous instance for distance calculation
+        last_frame, last_inst = track_candidates.get(track_id, (None, None))
+        if last_frame is not None:
+            context["frame_gap"] = frame_idx - last_frame
+
+        # Get centroids for distance calculation
+        if last_inst is not None:
+            prev_centroid = get_centroid(last_inst)
+            if prev_centroid is not None:
+                context["centroid_prev"] = prev_centroid.tolist()
+
+                # Get current instance centroid
+                curr_inst = current_instances[inst_idx]
+                curr_centroid = get_centroid(curr_inst)
+                if curr_centroid is not None:
+                    context["centroid_curr"] = curr_centroid.tolist()
+                    context["distance"] = float(np.linalg.norm(curr_centroid - prev_centroid))
+
+        return context
+
     @classmethod
     def from_kde_paths(
         cls,
@@ -607,6 +739,26 @@ class MotionTracker(OnlineTrackingLayer):
             max_match_distance=None,
             **kwargs
         )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get motion tracker configuration.
+
+        Returns:
+            Dict of configuration parameters for this motion tracker.
+        """
+        config = super().get_config()
+        config.update({
+            "long_kde_path": str(self.long_kde_path) if self.long_kde_path else None,
+            "short_kde_path": str(self.short_kde_path) if self.short_kde_path else None,
+            "short_distance_threshold": self.short_distance_threshold,
+            "kde_percentile": self.kde_percentile,
+            "kde_samples": self.kde_samples,
+            "min_probability_threshold": self.min_probability_threshold,
+            "proximity_threshold": self.proximity_threshold,
+            "iou_threshold": self.iou_threshold,
+            "max_match_distance": self.max_match_distance,
+        })
+        return config
 
 
 # =============================================================================
@@ -784,6 +936,48 @@ def compute_directional_multiplier(
 
         # Interpolate between forward_boost and backward_penalty
         return forward_boost * (1 - smooth_progress) + backward_penalty * smooth_progress
+
+
+def compute_facing_consistency(
+    prev_facing: Optional[np.ndarray],
+    curr_facing: Optional[np.ndarray],
+    soft_threshold: float = 30.0,
+    hard_threshold: float = 90.0,
+) -> float:
+    """Compute facing direction consistency between frames.
+
+    Animals don't typically spin >45 degrees in one frame. Large changes in
+    facing direction suggest this is a different animal.
+
+    This check prevents ID switches when two animals are close together but
+    facing different directions.
+
+    Args:
+        prev_facing: Unit vector of previous frame's facing direction
+        curr_facing: Unit vector of current frame's (candidate's) facing direction
+        soft_threshold: Angle (degrees) below which full score is given
+        hard_threshold: Angle (degrees) above which score is 0 (hard reject)
+
+    Returns:
+        Consistency score between 0 and 1:
+        - 1.0 if angle change <= soft_threshold
+        - 0.0 if angle change >= hard_threshold
+        - Linear interpolation in between
+    """
+    if prev_facing is None or curr_facing is None:
+        return 1.0  # Can't compute - don't penalize
+
+    # Compute angle between facing directions
+    dot = np.clip(np.dot(prev_facing, curr_facing), -1.0, 1.0)
+    angle_change = math.degrees(math.acos(dot))
+
+    if angle_change <= soft_threshold:
+        return 1.0
+    elif angle_change >= hard_threshold:
+        return 0.0
+    else:
+        # Linear interpolation
+        return 1.0 - (angle_change - soft_threshold) / (hard_threshold - soft_threshold)
 
 
 class DirectionalKDEModel:
@@ -991,6 +1185,17 @@ class DirectionalMotionTracker(MotionTracker):
             **kwargs,
         )
 
+        # Replace explanation generator with directional version
+        self._explanation_generator = DirectionalMotionExplanationGenerator(
+            max_match_distance=max_match_distance,
+            min_probability_threshold=min_probability_threshold,
+            proximity_threshold=proximity_threshold,
+            iou_threshold=iou_threshold,
+            backward_rejection_angle=backward_rejection_angle,
+            stagnant_threshold=stagnant_threshold,
+            kde_threshold=kde_threshold,
+        )
+
     def _load_directional_kde(self) -> None:
         """Load the directional KDE model with fallback support."""
         if self._long_kde_path is None:
@@ -1115,6 +1320,161 @@ class DirectionalMotionTracker(MotionTracker):
         max_dist = self.max_match_distance if self.max_match_distance else 160.0
         return 1.0 - (distance / max_dist)
 
+    def _create_decision_record(
+        self,
+        frame_idx: int,
+        instance_idx: int,
+        decision_type: DecisionType,
+        assigned_track_id: Optional[str],
+        previous_track_id: Optional[str],
+        summary: str,
+        reasons: List[str],
+        candidate_scores: List[CandidateScore],
+        instance_centroid: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> DirectionalMotionDecisionRecord:
+        """Create a DirectionalMotionDecisionRecord for this tracker.
+
+        Overrides parent to include directional-specific information like
+        facing direction, alignment angle, and directional penalties.
+
+        Args:
+            frame_idx: Frame index.
+            instance_idx: Instance index within the frame.
+            decision_type: Type of decision made.
+            assigned_track_id: Track ID assigned (None if no assignment).
+            previous_track_id: Previous track ID if any.
+            summary: Human-readable summary.
+            reasons: List of reasons explaining the decision.
+            candidate_scores: List of CandidateScore for all candidates.
+            instance_centroid: (x, y) centroid of the instance.
+            **kwargs: Additional context (facing_direction, alignment_angle, etc.).
+
+        Returns:
+            DirectionalMotionDecisionRecord for this decision.
+        """
+        # Build threshold dict
+        thresholds = {}
+        if self.max_match_distance is not None:
+            thresholds['max_match_distance'] = self.max_match_distance
+        if self.min_probability_threshold is not None:
+            thresholds['min_probability_threshold'] = self.min_probability_threshold
+        if self.proximity_threshold is not None:
+            thresholds['proximity_threshold'] = self.proximity_threshold
+        if self.iou_threshold is not None:
+            thresholds['iou_threshold'] = self.iou_threshold
+        thresholds['kde_threshold'] = self.kde_threshold
+        thresholds['stagnant_threshold'] = self.stagnant_threshold
+        thresholds['backward_rejection_angle'] = self.backward_rejection_angle
+
+        # Extract directional fields from kwargs
+        facing_direction = kwargs.get('facing_direction')
+        if facing_direction is not None and not isinstance(facing_direction, tuple):
+            facing_direction = tuple(facing_direction)
+
+        return DirectionalMotionDecisionRecord(
+            frame_idx=frame_idx,
+            instance_idx=instance_idx,
+            tracker_name=self.name,
+            tracker_priority=self.priority,
+            decision_type=decision_type,
+            assigned_track_id=assigned_track_id,
+            previous_track_id=previous_track_id,
+            summary=summary,
+            reasons=reasons,
+            thresholds=thresholds,
+            instance_centroid=instance_centroid,
+            candidate_scores=candidate_scores,
+            winning_track_id=assigned_track_id,
+            kde_model_used="directional_kde" if self.directional_kde else None,
+            motion_probability=kwargs.get('motion_probability'),
+            threshold_checks=kwargs.get('threshold_checks', {}),
+            facing_direction=facing_direction,
+            alignment_angle=kwargs.get('alignment_angle'),
+            is_stagnant=kwargs.get('is_stagnant', False),
+            directional_multiplier=kwargs.get('directional_multiplier', 1.0),
+            backward_rejected=kwargs.get('backward_rejected', False),
+        )
+
+    def _get_explanation_context(
+        self,
+        track_id: str,
+        inst_idx: int,
+        track_data: Dict[str, Any],
+        track_candidates: Dict[str, Tuple[int, sio.PredictedInstance]],
+        current_instances: List[sio.PredictedInstance],
+        frame_idx: int,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Get directional motion-specific context for explanation generation.
+
+        Args:
+            track_id: Track ID being matched.
+            inst_idx: Instance index being matched.
+            track_data: Track data from active_tracks.
+            track_candidates: Dict of track candidates.
+            current_instances: List of current frame instances.
+            frame_idx: Current frame index.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Dict of directional motion-specific context.
+        """
+        # Get base context from parent
+        context = super()._get_explanation_context(
+            track_id, inst_idx, track_data, track_candidates,
+            current_instances, frame_idx, **kwargs
+        )
+
+        # Get previous instance for directional calculations
+        last_frame, last_inst = track_candidates.get(track_id, (None, None))
+        if last_inst is None:
+            return context
+
+        # Get centroids
+        prev_centroid = get_centroid(last_inst)
+        curr_inst = current_instances[inst_idx]
+        curr_centroid = get_centroid(curr_inst)
+
+        if prev_centroid is None or curr_centroid is None:
+            return context
+
+        # Calculate movement
+        movement_vector = curr_centroid - prev_centroid
+        movement_distance = np.linalg.norm(movement_vector)
+        context["distance"] = float(movement_distance)
+
+        # Determine if stagnant
+        is_stagnant = movement_distance <= self.stagnant_threshold
+        context["is_stagnant"] = is_stagnant
+
+        # Get facing direction
+        facing_dir = get_facing_direction(last_inst)
+        if facing_dir is not None:
+            context["facing_direction"] = facing_dir.tolist()
+
+            # Calculate alignment only if not stagnant
+            if not is_stagnant:
+                dot_product, alignment_angle, is_forward, is_backward, is_lateral = \
+                    compute_directional_alignment(facing_dir, movement_vector)
+                context["alignment_angle"] = float(alignment_angle)
+                context["is_forward"] = is_forward
+                context["is_backward"] = is_backward
+                context["is_lateral"] = is_lateral
+
+                # Calculate directional multiplier
+                directional_multiplier = compute_directional_multiplier(
+                    dot_product,
+                    alignment_angle,
+                    self.forward_boost,
+                    self.backward_penalty,
+                    0.5,  # lateral_penalty
+                    self.soft_threshold_angle,
+                )
+                context["directional_multiplier"] = float(directional_multiplier)
+
+        return context
+
     @classmethod
     def for_tracklets(
         cls,
@@ -1163,3 +1523,254 @@ class DirectionalMotionTracker(MotionTracker):
             name=name,
             **kwargs,
         )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get directional motion tracker configuration.
+
+        Returns:
+            Dict of configuration parameters for this directional tracker.
+        """
+        config = super().get_config()
+        # Override with directional-specific parameters
+        config.update({
+            "long_kde_path": str(self._long_kde_path) if self._long_kde_path else None,
+            "kde_threshold": self.kde_threshold,
+            "forward_boost": self.forward_boost,
+            "backward_penalty": self.backward_penalty,
+            "soft_threshold_angle": self.soft_threshold_angle,
+            "reject_backward": self.reject_backward,
+            "backward_rejection_angle": self.backward_rejection_angle,
+            "stagnant_threshold": self.stagnant_threshold,
+            "kde_decay_rate": self.kde_decay_rate,
+            "kde_min_probability": self.kde_min_probability,
+            "kde_outside_penalty": self.kde_outside_penalty,
+            "kde_percentile": self._kde_percentile,
+            "kde_samples": self._kde_samples,
+        })
+        # Remove short_kde_path as we don't use it
+        config.pop("short_kde_path", None)
+        config.pop("short_distance_threshold", None)
+        return config
+
+
+class FacingConsistencyTracker(DirectionalMotionTracker):
+    """Motion tracker with facing direction consistency constraint.
+
+    Extends DirectionalMotionTracker by adding a check that the candidate's
+    facing direction is consistent with the track's previous facing direction.
+
+    This prevents ID switches when two animals are close together but
+    facing different directions. The key insight is that animals can't spin
+    >90 degrees in a single frame, so a candidate whose facing direction is
+    very different from the track's previous facing direction is likely a
+    different animal.
+
+    Example scenario this addresses:
+    - tracklet_1 (facing 60 deg) is near tracklet_8 (facing 150 deg)
+    - Instance A faces 58 deg (consistent with tracklet_1)
+    - Instance B faces 164 deg (consistent with tracklet_8)
+    - Without facing consistency, the Hungarian algorithm might swap them
+    - With facing consistency:
+      - tracklet_1 -> Instance B: 60 vs 164 = 104 deg change (REJECTED)
+      - tracklet_8 -> Instance A: 150 vs 58 = 92 deg change (REJECTED)
+
+    Attributes:
+        facing_soft_threshold: Angle below which full score is given (default 30)
+        facing_hard_threshold: Angle above which candidate is rejected (default 90)
+    """
+
+    def __init__(
+        self,
+        # Facing consistency parameters
+        facing_soft_threshold: float = 30.0,
+        facing_hard_threshold: float = 90.0,
+        # Parent class parameters
+        long_kde_path: str = None,
+        kde_threshold: float = 40.0,
+        forward_boost: float = 1.0,
+        backward_penalty: float = 0.1,
+        soft_threshold_angle: float = 45.0,
+        reject_backward: bool = True,
+        backward_rejection_angle: float = 120.0,
+        stagnant_threshold: float = 15.0,
+        max_match_distance: float = 130.0,
+        min_probability_threshold: float = 0.1,
+        proximity_threshold: Optional[float] = 50.0,
+        iou_threshold: Optional[float] = 0.1,
+        kde_decay_rate: float = 15.0,
+        kde_min_probability: float = 0.01,
+        kde_outside_penalty: float = 0.3,
+        kde_percentile: float = 95.0,
+        kde_samples: int = 100000,
+        priority: int = 5,
+        name: str = "FacingConsistency",
+        **kwargs,
+    ):
+        """Initialize the facing consistency tracker.
+
+        Args:
+            facing_soft_threshold: Angle (degrees) below which full score is given.
+                Candidates with facing direction change less than this get no penalty.
+            facing_hard_threshold: Angle (degrees) above which candidate is rejected.
+                Candidates with facing direction change greater than this get score=0.
+            long_kde_path: Path to long-distance KDE model (.joblib)
+            kde_threshold: Use KDE for movements >= this distance (default 40px)
+            forward_boost: Score multiplier for forward movement
+            backward_penalty: Score multiplier for backward movement
+            soft_threshold_angle: Angle at which directional penalty starts
+            reject_backward: If True, reject extreme backward movements
+            backward_rejection_angle: Angle above which movement is rejected
+            stagnant_threshold: Distance below which directional penalty is skipped
+            max_match_distance: Maximum distance to consider for matching
+            min_probability_threshold: Minimum probability to continue track
+            proximity_threshold: Minimum distance to other instances (None to disable)
+            iou_threshold: Maximum IoU with other instances (None to disable)
+            kde_decay_rate: Rate of exponential decay for out-of-bounds
+            kde_min_probability: Minimum probability for out-of-bounds
+            kde_outside_penalty: Penalty multiplier for out-of-bounds
+            kde_percentile: Percentile for KDE bounds computation
+            kde_samples: Number of samples for KDE bounds estimation
+            priority: Priority level for conflict resolution
+            name: Layer name for history tracking
+        """
+        self.facing_soft_threshold = facing_soft_threshold
+        self.facing_hard_threshold = facing_hard_threshold
+
+        super().__init__(
+            long_kde_path=long_kde_path,
+            kde_threshold=kde_threshold,
+            forward_boost=forward_boost,
+            backward_penalty=backward_penalty,
+            soft_threshold_angle=soft_threshold_angle,
+            reject_backward=reject_backward,
+            backward_rejection_angle=backward_rejection_angle,
+            stagnant_threshold=stagnant_threshold,
+            max_match_distance=max_match_distance,
+            min_probability_threshold=min_probability_threshold,
+            proximity_threshold=proximity_threshold,
+            iou_threshold=iou_threshold,
+            kde_decay_rate=kde_decay_rate,
+            kde_min_probability=kde_min_probability,
+            kde_outside_penalty=kde_outside_penalty,
+            kde_percentile=kde_percentile,
+            kde_samples=kde_samples,
+            priority=priority,
+            name=name,
+            **kwargs,
+        )
+
+    def compute_association_score(
+        self,
+        instance1: sio.PredictedInstance,
+        instance2: sio.PredictedInstance,
+        frame_gap: int = 1,
+        track_history: Optional[List[Tuple[int, sio.PredictedInstance]]] = None,
+        **kwargs,
+    ) -> float:
+        """Compute association score with facing consistency.
+
+        Extends parent score computation by adding facing direction consistency.
+        The candidate's facing direction must be similar to the track's previous
+        facing direction.
+
+        Args:
+            instance1: Instance from previous frame (track's last known position)
+            instance2: Candidate instance from current frame
+            frame_gap: Number of frames between instances
+            track_history: Track history for context
+
+        Returns:
+            Association score (higher = better match). Returns 0.0 if facing
+            direction change exceeds facing_hard_threshold.
+        """
+        # Get facing directions
+        prev_facing = get_facing_direction(instance1)
+        curr_facing = get_facing_direction(instance2)
+
+        # Compute facing consistency
+        facing_consistency = compute_facing_consistency(
+            prev_facing,
+            curr_facing,
+            self.facing_soft_threshold,
+            self.facing_hard_threshold,
+        )
+
+        # Hard reject if facing consistency is 0
+        if facing_consistency == 0.0:
+            return 0.0
+
+        # Get base score from parent (includes directional penalty, KDE, etc.)
+        base_score = super().compute_association_score(
+            instance1, instance2, frame_gap, track_history, **kwargs
+        )
+
+        # Apply facing consistency as a multiplier
+        return base_score * facing_consistency
+
+    @classmethod
+    def for_tracklets(
+        cls,
+        long_kde_path: str,
+        facing_soft_threshold: float = 30.0,
+        facing_hard_threshold: float = 90.0,
+        kde_threshold: float = 40.0,
+        max_match_distance: float = 130.0,
+        min_probability_threshold: float = 0.1,
+        proximity_threshold: float = 50.0,
+        iou_threshold: float = 0.1,
+        reject_backward: bool = True,
+        backward_rejection_angle: float = 120.0,
+        priority: int = 5,
+        name: str = "FacingConsistencyTrackletGenerator",
+        **kwargs,
+    ) -> "FacingConsistencyTracker":
+        """Create FacingConsistencyTracker configured for tracklet generation.
+
+        Convenience constructor with sensible defaults for tracklet generation.
+
+        Args:
+            long_kde_path: Path to long-distance KDE model
+            facing_soft_threshold: Angle below which full score is given
+            facing_hard_threshold: Angle above which candidate is rejected
+            kde_threshold: Movement threshold for KDE vs distance scoring
+            max_match_distance: Maximum distance to consider for matching
+            min_probability_threshold: Minimum probability to continue track
+            proximity_threshold: Minimum distance to other instances
+            iou_threshold: Maximum IoU with other instances
+            reject_backward: If True, reject extreme backward movements
+            backward_rejection_angle: Angle above which movement is rejected
+            priority: Priority level
+            name: Layer name
+            **kwargs: Additional arguments
+
+        Returns:
+            FacingConsistencyTracker configured for tracklet generation
+        """
+        return cls(
+            long_kde_path=long_kde_path,
+            facing_soft_threshold=facing_soft_threshold,
+            facing_hard_threshold=facing_hard_threshold,
+            kde_threshold=kde_threshold,
+            max_match_distance=max_match_distance,
+            min_probability_threshold=min_probability_threshold,
+            proximity_threshold=proximity_threshold,
+            iou_threshold=iou_threshold,
+            reject_backward=reject_backward,
+            backward_rejection_angle=backward_rejection_angle,
+            priority=priority,
+            name=name,
+            **kwargs,
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get facing consistency tracker configuration.
+
+        Returns:
+            Dict of configuration parameters for this facing consistency tracker.
+        """
+        config = super().get_config()
+        config.update({
+            "facing_soft_threshold": self.facing_soft_threshold,
+            "facing_hard_threshold": self.facing_hard_threshold,
+        })
+        return config

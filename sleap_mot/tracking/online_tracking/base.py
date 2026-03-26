@@ -12,12 +12,24 @@ The mode is determined by threshold parameters specific to each tracking method.
 """
 
 from sleap_mot.tracking.base import TrackingLayer, TrackContext
+from sleap_mot.tracking.explanations import ExplanationGenerator
+from sleap_mot.tracking.instance_explanations import (
+    InstanceExplanationStore,
+    BaseDecisionRecord,
+    MotionDecisionRecord,
+    CandidateScore,
+    DecisionType,
+)
+from sleap_mot.utils import get_centroid
 import sleap_io as sio
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Tuple, Any, TYPE_CHECKING
 from collections import defaultdict
 from scipy.optimize import linear_sum_assignment
+
+if TYPE_CHECKING:
+    from sleap_mot.metrics.types import SwitchExplanation
 
 
 class OnlineTrackingLayer(TrackingLayer, ABC):
@@ -83,6 +95,106 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         self.clear_tracks = clear_tracks
         self._track_counter = 0
         self._tracklet_counter = 0
+        self._explanation_generator: Optional[ExplanationGenerator] = None
+        self._explanation_store: Optional[InstanceExplanationStore] = None
+
+    @property
+    def explanation_generator(self) -> Optional[ExplanationGenerator]:
+        """Get the explanation generator for this tracker.
+
+        Returns:
+            The explanation generator instance, or None if not configured.
+        """
+        return self._explanation_generator
+
+    @explanation_generator.setter
+    def explanation_generator(self, generator: Optional[ExplanationGenerator]) -> None:
+        """Set the explanation generator for this tracker.
+
+        Args:
+            generator: The explanation generator to use.
+        """
+        self._explanation_generator = generator
+
+    @property
+    def explanation_store(self) -> Optional[InstanceExplanationStore]:
+        """Get the instance explanation store.
+
+        Returns:
+            The InstanceExplanationStore, or None if not configured.
+        """
+        return self._explanation_store
+
+    @explanation_store.setter
+    def explanation_store(self, store: Optional[InstanceExplanationStore]) -> None:
+        """Set the instance explanation store.
+
+        Args:
+            store: The InstanceExplanationStore to use for logging decisions.
+        """
+        self._explanation_store = store
+
+    def _create_decision_record(
+        self,
+        frame_idx: int,
+        instance_idx: int,
+        decision_type: DecisionType,
+        assigned_track_id: Optional[str],
+        previous_track_id: Optional[str],
+        summary: str,
+        reasons: List[str],
+        candidate_scores: List[CandidateScore],
+        instance_centroid: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> MotionDecisionRecord:
+        """Create a decision record for this tracker.
+
+        Subclasses can override this to create tracker-specific records.
+
+        Args:
+            frame_idx: Frame index.
+            instance_idx: Instance index within the frame.
+            decision_type: Type of decision made.
+            assigned_track_id: Track ID assigned (None if no assignment).
+            previous_track_id: Previous track ID if any.
+            summary: Human-readable summary.
+            reasons: List of reasons explaining the decision.
+            candidate_scores: List of CandidateScore for all candidates.
+            instance_centroid: (x, y) centroid of the instance.
+            **kwargs: Additional tracker-specific context.
+
+        Returns:
+            MotionDecisionRecord for this decision.
+        """
+        # Build threshold dict
+        thresholds = {}
+        if hasattr(self, 'max_match_distance') and self.max_match_distance is not None:
+            thresholds['max_match_distance'] = self.max_match_distance
+        if hasattr(self, 'min_probability_threshold') and self.min_probability_threshold is not None:
+            thresholds['min_probability_threshold'] = self.min_probability_threshold
+        if hasattr(self, 'proximity_threshold') and self.proximity_threshold is not None:
+            thresholds['proximity_threshold'] = self.proximity_threshold
+        if hasattr(self, 'iou_threshold') and self.iou_threshold is not None:
+            thresholds['iou_threshold'] = self.iou_threshold
+
+        return MotionDecisionRecord(
+            frame_idx=frame_idx,
+            instance_idx=instance_idx,
+            tracker_name=self.name,
+            tracker_priority=self.priority,
+            decision_type=decision_type,
+            assigned_track_id=assigned_track_id,
+            previous_track_id=previous_track_id,
+            summary=summary,
+            reasons=reasons,
+            thresholds=thresholds,
+            instance_centroid=instance_centroid,
+            candidate_scores=candidate_scores,
+            winning_track_id=assigned_track_id,
+            kde_model_used=kwargs.get('kde_model_used'),
+            motion_probability=kwargs.get('motion_probability'),
+            threshold_checks=kwargs.get('threshold_checks', {}),
+        )
 
     @abstractmethod
     def _configure_thresholds(self, **kwargs) -> None:
@@ -203,12 +315,15 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         # {track_id: {"instances": [(frame_idx, instance), ...], "last_frame": int}}
         active_tracks: Dict[str, Dict[str, Any]] = {}
 
-        # Process each frame sequentially
-        n_frames = len(labels.labeled_frames)
-        for frame_idx in range(n_frames):
+        # Build frame_idx -> LabeledFrame mapping for efficient lookup
+        # IMPORTANT: labels[x] returns the x-th labeled frame, NOT the frame at index x
+        self._frame_idx_to_lf = {lf.frame_idx: lf for lf in labels.labeled_frames}
+
+        # Process each labeled frame sequentially (using actual frame indices)
+        for lf in labels.labeled_frames:
             self._process_frame(
                 labels,
-                frame_idx,
+                lf,  # Pass the LabeledFrame directly
                 active_tracks,
                 max_instances,
                 **kwargs
@@ -219,7 +334,7 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
     def _process_frame(
         self,
         labels: sio.Labels,
-        frame_idx: int,
+        lf_or_idx,  # Can be LabeledFrame or int (for backwards compatibility)
         active_tracks: Dict[str, Dict[str, Any]],
         max_instances: int,
         **kwargs
@@ -232,12 +347,21 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
         Args:
             labels: SLEAP Labels object
-            frame_idx: Current frame index
+            lf_or_idx: LabeledFrame object or frame index (actual video frame index)
             active_tracks: Dict of active track_id -> track data
             max_instances: Maximum instances per frame
             **kwargs: Additional arguments for scoring methods
         """
-        lf = labels.labeled_frames[frame_idx]
+        # Handle both LabeledFrame and int for backwards compatibility
+        if isinstance(lf_or_idx, int):
+            lf = self._frame_idx_to_lf.get(lf_or_idx)
+            if lf is None:
+                return
+            frame_idx = lf_or_idx
+        else:
+            lf = lf_or_idx
+            frame_idx = lf.frame_idx
+
         current_instances = list(lf.instances)
 
         if not current_instances:
@@ -248,11 +372,39 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
         if not track_candidates:
             # No active tracks - create new tracks for all instances
-            for inst in current_instances:
+            for inst_idx, inst in enumerate(current_instances):
                 track_id = self._generate_track_id()
+
+                # Generate explanation if available
+                explanation = None
+                if self._explanation_generator is not None:
+                    explanation = self._explanation_generator.explain_new_track(
+                        track_id=track_id,
+                        instance_idx=inst_idx,
+                        reason="no_active_tracks",
+                    )
+
+                # Log to instance explanation store
+                if self._explanation_store is not None:
+                    centroid = get_centroid(inst)
+                    centroid_tuple = tuple(centroid.tolist()) if centroid is not None else None
+                    record = self._create_decision_record(
+                        frame_idx=frame_idx,
+                        instance_idx=inst_idx,
+                        decision_type=DecisionType.NEW_TRACK,
+                        assigned_track_id=track_id,
+                        previous_track_id=None,
+                        summary="New track (no active tracks)",
+                        reasons=["No active tracks to match against"],
+                        candidate_scores=[],
+                        instance_centroid=centroid_tuple,
+                    )
+                    self._explanation_store.add(record)
+
                 self._assign_track_to_instance(
                     labels, frame_idx, inst, track_id,
-                    reason="New track (no active tracks)"
+                    reason="New track (no active tracks)",
+                    explanation=explanation,
                 )
                 active_tracks[track_id] = {
                     "instances": [(frame_idx, inst)],
@@ -279,14 +431,85 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
             **kwargs
         )
 
+        # Build score lookup for explanations
+        track_ids = list(track_candidates.keys())
+        all_scores_by_track = {}
+        all_scores_by_instance: Dict[int, Dict[str, float]] = {}
+        for t_idx, track_id in enumerate(track_ids):
+            all_scores_by_track[track_id] = {
+                str(i): -cost_matrix[t_idx, i] if cost_matrix[t_idx, i] < 1e9 else 0.0
+                for i in range(len(current_instances))
+            }
+            # Also build by instance for the new store
+            for i in range(len(current_instances)):
+                if i not in all_scores_by_instance:
+                    all_scores_by_instance[i] = {}
+                score_val = -cost_matrix[t_idx, i] if cost_matrix[t_idx, i] < 1e9 else 0.0
+                all_scores_by_instance[i][track_id] = score_val
+
+        # Build matched instance set for later
+        matched_instance_set = set(inst_idx for _, inst_idx in matched_pairs)
+
         # Process matched pairs
         for track_id, inst_idx in matched_pairs:
             inst = current_instances[inst_idx]
             track_data = active_tracks[track_id]
+            score = all_scores_by_track.get(track_id, {}).get(str(inst_idx), 0.0)
+
+            # Generate explanation if available
+            explanation = None
+            if self._explanation_generator is not None:
+                # Get context for explanation
+                context = self._get_explanation_context(
+                    track_id, inst_idx, track_data, track_candidates,
+                    current_instances, frame_idx, **kwargs
+                )
+                explanation = self._explanation_generator.explain_match(
+                    track_id=track_id,
+                    instance_idx=inst_idx,
+                    score=score,
+                    all_scores=all_scores_by_track.get(track_id, {}),
+                    **context,
+                )
+
+            # Log to instance explanation store
+            if self._explanation_store is not None:
+                centroid = get_centroid(inst)
+                centroid_tuple = tuple(centroid.tolist()) if centroid is not None else None
+
+                # Build candidate scores for this instance
+                candidate_scores = []
+                for candidate_track_id, candidate_score in all_scores_by_instance.get(inst_idx, {}).items():
+                    passed = True
+                    rejection_reason = None
+                    if candidate_track_id != track_id:
+                        rejection_reason = "Lower score" if candidate_score < score else "Lost to better match"
+                    candidate_scores.append(CandidateScore(
+                        candidate_id=candidate_track_id,
+                        score=candidate_score,
+                        passed_thresholds=passed,
+                        threshold_results={},
+                        rejection_reason=rejection_reason,
+                    ))
+
+                record = self._create_decision_record(
+                    frame_idx=frame_idx,
+                    instance_idx=inst_idx,
+                    decision_type=DecisionType.MATCHED,
+                    assigned_track_id=track_id,
+                    previous_track_id=None,
+                    summary=f"Matched to {track_id} with score {score:.4f}",
+                    reasons=[f"Best match score: {score:.4f}"],
+                    candidate_scores=candidate_scores,
+                    instance_centroid=centroid_tuple,
+                    motion_probability=score,
+                )
+                self._explanation_store.add(record)
 
             self._assign_track_to_instance(
                 labels, frame_idx, inst, track_id,
-                reason=f"Matched to existing track (score-based)"
+                reason=f"Matched to existing track (score-based)",
+                explanation=explanation,
             )
             track_data["instances"].append((frame_idx, inst))
             track_data["last_frame"] = frame_idx
@@ -295,9 +518,54 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         for inst_idx in unmatched_instances:
             inst = current_instances[inst_idx]
             track_id = self._generate_track_id()
+
+            # Generate explanation if available
+            explanation = None
+            if self._explanation_generator is not None:
+                explanation = self._explanation_generator.explain_new_track(
+                    track_id=track_id,
+                    instance_idx=inst_idx,
+                    reason="unmatched_instance",
+                )
+
+            # Log to instance explanation store
+            if self._explanation_store is not None:
+                centroid = get_centroid(inst)
+                centroid_tuple = tuple(centroid.tolist()) if centroid is not None else None
+
+                # Build candidate scores (why this instance didn't match any track)
+                candidate_scores = []
+                for candidate_track_id, candidate_score in all_scores_by_instance.get(inst_idx, {}).items():
+                    candidate_scores.append(CandidateScore(
+                        candidate_id=candidate_track_id,
+                        score=candidate_score,
+                        passed_thresholds=False,
+                        threshold_results={},
+                        rejection_reason="Instance unmatched (assigned to another or rejected)",
+                    ))
+
+                reasons = ["Instance could not be matched to any existing track"]
+                if candidate_scores:
+                    best_score = max(cs.score for cs in candidate_scores) if candidate_scores else 0.0
+                    reasons.append(f"Best available score was {best_score:.4f}")
+
+                record = self._create_decision_record(
+                    frame_idx=frame_idx,
+                    instance_idx=inst_idx,
+                    decision_type=DecisionType.NEW_TRACK,
+                    assigned_track_id=track_id,
+                    previous_track_id=None,
+                    summary=f"New track (unmatched instance)",
+                    reasons=reasons,
+                    candidate_scores=candidate_scores,
+                    instance_centroid=centroid_tuple,
+                )
+                self._explanation_store.add(record)
+
             self._assign_track_to_instance(
                 labels, frame_idx, inst, track_id,
-                reason="New track (unmatched instance)"
+                reason="New track (unmatched instance)",
+                explanation=explanation,
             )
             active_tracks[track_id] = {
                 "instances": [(frame_idx, inst)],
@@ -312,6 +580,40 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
         for track_id in tracks_to_remove:
             del active_tracks[track_id]
+
+    def _get_explanation_context(
+        self,
+        track_id: str,
+        inst_idx: int,
+        track_data: Dict[str, Any],
+        track_candidates: Dict[str, Tuple[int, sio.PredictedInstance]],
+        current_instances: List[sio.PredictedInstance],
+        frame_idx: int,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Get context for explanation generation.
+
+        Subclasses can override this to provide tracker-specific context.
+
+        Args:
+            track_id: Track ID being matched.
+            inst_idx: Instance index being matched.
+            track_data: Track data from active_tracks.
+            track_candidates: Dict of track candidates.
+            current_instances: List of current frame instances.
+            frame_idx: Current frame index.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Dict of context for explanation generation.
+        """
+        context = {}
+
+        # Add frame gap
+        last_frame, _ = track_candidates.get(track_id, (frame_idx - 1, None))
+        context["frame_gap"] = frame_idx - last_frame
+
+        return context
 
     def _get_track_candidates(
         self,
@@ -511,11 +813,11 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
         frame_idx: int,
         instance: sio.PredictedInstance,
         track_id: str,
-        reason: str = "Track assignment"
-    ) -> None:
-        """Assign a track to an instance with TrackContext.
-
-        Creates a TrackContext wrapper with history tracking.
+        reason: str = "Track assignment",
+        explanation: Optional[Any] = None,
+        propagate_to_tracklet: bool = False,
+    ) -> bool:
+        """Assign a track to an instance with priority-based conflict resolution.
 
         Args:
             labels: SLEAP Labels object
@@ -523,6 +825,70 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
             instance: Instance to assign track to
             track_id: Track ID to assign
             reason: Reason for assignment (for history)
+            explanation: Optional SwitchExplanation for detailed tracking info
+            propagate_to_tracklet: If True and the instance belongs to a
+                temporary tracklet, rename the entire tracklet to track_id.
+                If False (default), only assign this single frame.
+
+        Returns:
+            True if assignment was made, False if blocked by higher priority.
+        """
+        # Find instance index in the frame
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
+            return False
+
+        instance_idx = None
+        for idx, inst in enumerate(lf.instances):
+            if inst is instance:
+                instance_idx = idx
+                break
+
+        if instance_idx is None:
+            # Instance not found, fall back to direct assignment
+            return self._fallback_assign_track(
+                labels, instance, track_id, frame_idx, reason, explanation
+            )
+
+        # Convert SwitchExplanation to dict if provided
+        explanation_dict = None
+        if explanation is not None:
+            if hasattr(explanation, 'to_dict'):
+                explanation_dict = explanation.to_dict()
+            elif isinstance(explanation, dict):
+                explanation_dict = explanation
+
+        return self.assign_with_priority_resolution(
+            labels=labels,
+            frame_idx=frame_idx,
+            instance_idx=instance_idx,
+            new_track_name=track_id,
+            reason=reason,
+            explanation=explanation_dict,
+            propagate_to_tracklet=propagate_to_tracklet,
+        )
+
+    def _fallback_assign_track(
+        self,
+        labels: sio.Labels,
+        instance: sio.PredictedInstance,
+        track_id: str,
+        frame_idx: int,
+        reason: str,
+        explanation: Optional[Any],
+    ) -> bool:
+        """Fallback direct assignment when instance_idx cannot be determined.
+
+        Args:
+            labels: SLEAP Labels object
+            instance: Instance to assign track to
+            track_id: Track ID to assign
+            frame_idx: Frame index
+            reason: Reason for assignment
+            explanation: Optional explanation
+
+        Returns:
+            True (always succeeds for fallback)
         """
         # Find or create the sio.Track
         existing_track = next(
@@ -550,6 +916,14 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
             track_history=[]
         )
 
+        # Convert SwitchExplanation to dict if provided
+        explanation_dict = None
+        if explanation is not None:
+            if hasattr(explanation, 'to_dict'):
+                explanation_dict = explanation.to_dict()
+            elif isinstance(explanation, dict):
+                explanation_dict = explanation
+
         # Add history entry
         track_context.add_history_entry(
             layer_name=self.name,
@@ -558,10 +932,12 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
             frame_idx=frame_idx,
             reason=reason,
             conflict_resolved=False,
-            propagated_from_frame=None
+            propagated_from_frame=None,
+            explanation=explanation_dict,
         )
 
         instance.track = track_context
+        return True
 
     def _calculate_max_instances(self, labels: sio.Labels) -> int:
         """Calculate the maximum number of instances across all frames.
@@ -576,14 +952,39 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
             return 0
         return max(len(lf.instances) for lf in labels)
 
+    def get_config(self) -> Dict[str, Any]:
+        """Get online tracker configuration.
+
+        Returns:
+            Dict of configuration parameters for this online tracker.
+        """
+        config = super().get_config()
+        config.update({
+            "max_gap": self.max_gap,
+            "matching_method": self.matching_method,
+            "clear_tracks": self.clear_tracks,
+        })
+        return config
+
     # Implement abstract methods from TrackingLayer
+    # IMPORTANT: frame_idx parameters are actual video frame indices, not list indices
+
+    def _get_lf(self, labels, frame_idx):
+        """Get LabeledFrame by actual frame index.
+
+        Uses cached mapping if available, otherwise builds it.
+        """
+        if hasattr(self, '_frame_idx_to_lf') and self._frame_idx_to_lf:
+            return self._frame_idx_to_lf.get(frame_idx)
+        # Fallback: build mapping on demand
+        return {lf.frame_idx: lf for lf in labels.labeled_frames}.get(frame_idx)
 
     def get_track_context(self, labels, frame_idx, track) -> Optional[TrackContext]:
         """Get the TrackContext for a track in a specific frame."""
-        if frame_idx >= len(labels):
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
             return None
 
-        lf = labels.labeled_frames[frame_idx]
         for inst in lf.instances:
             if inst.track is not None:
                 if isinstance(inst.track, TrackContext):
@@ -602,10 +1003,10 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
     def has_track_in_frame(self, labels, frame_idx, track) -> bool:
         """Check if a track exists in a specific frame."""
-        if frame_idx >= len(labels):
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
             return False
 
-        lf = labels.labeled_frames[frame_idx]
         for inst in lf.instances:
             if inst.track is not None:
                 if hasattr(inst.track, 'name') and inst.track.name == track.name:
@@ -614,10 +1015,10 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
     def get_instance_with_track(self, labels, frame_idx, track) -> Optional[int]:
         """Get the instance index that has a specific track in a frame."""
-        if frame_idx >= len(labels):
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
             return None
 
-        lf = labels.labeled_frames[frame_idx]
         for idx, inst in enumerate(lf.instances):
             if inst.track is not None:
                 if hasattr(inst.track, 'name') and inst.track.name == track.name:
@@ -626,30 +1027,56 @@ class OnlineTrackingLayer(TrackingLayer, ABC):
 
     def assign_track(self, labels, frame_idx, instance_idx, track, track_context=None) -> None:
         """Assign a track to an instance."""
-        if frame_idx >= len(labels):
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
             return
-        if instance_idx >= len(labels.labeled_frames[frame_idx].instances):
+        if instance_idx >= len(lf.instances):
             return
 
         existing = next((t for t in labels.tracks if t.name == track.name), None)
         if existing:
-            labels.labeled_frames[frame_idx].instances[instance_idx].track = existing
+            lf.instances[instance_idx].track = existing
         else:
             labels.tracks.append(track)
-            labels.labeled_frames[frame_idx].instances[instance_idx].track = track
+            lf.instances[instance_idx].track = track
 
     def remove_track(self, labels, frame_idx, instance_idx) -> None:
         """Remove track from an instance."""
-        if frame_idx >= len(labels):
+        lf = self._get_lf(labels, frame_idx)
+        if lf is None:
             return
-        if instance_idx >= len(labels.labeled_frames[frame_idx].instances):
+        if instance_idx >= len(lf.instances):
             return
 
-        labels.labeled_frames[frame_idx].instances[instance_idx].track = None
+        lf.instances[instance_idx].track = None
 
     def get_next_frame(self, labels, current_frame, direction) -> Optional[int]:
-        """Get the next frame index in a given direction."""
-        next_frame = current_frame + direction
-        if 0 <= next_frame < len(labels):
-            return next_frame
+        """Get the next labeled frame index in a given direction.
+
+        Args:
+            labels: SLEAP Labels object
+            current_frame: Current frame index (actual video frame index)
+            direction: 1 for forward, -1 for backward
+
+        Returns:
+            Next labeled frame index if valid, None otherwise
+        """
+        # Build sorted list of labeled frame indices
+        if not hasattr(self, '_frame_idx_to_lf') or not self._frame_idx_to_lf:
+            self._frame_idx_to_lf = {lf.frame_idx: lf for lf in labels.labeled_frames}
+
+        labeled_indices = sorted(self._frame_idx_to_lf.keys())
+        if not labeled_indices:
+            return None
+
+        if direction > 0:
+            # Find next labeled frame after current_frame
+            for idx in labeled_indices:
+                if idx > current_frame:
+                    return idx
+        else:
+            # Find previous labeled frame before current_frame
+            for idx in reversed(labeled_indices):
+                if idx < current_frame:
+                    return idx
         return None
